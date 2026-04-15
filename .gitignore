@@ -1,0 +1,20 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Downloaded files
+downloads/
+
+# Runtime data (not source code)
+processed_urls.json
+cookies.txt
+
+# Temp/UUID files
+*.txt
+!urls.txt
+!requirements.txt
+
+# Env / secrets
+.env
+*.env
