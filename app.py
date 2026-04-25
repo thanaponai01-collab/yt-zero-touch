@@ -38,7 +38,7 @@ BASE_DIR    = Path(__file__).parent
 DEFAULT_OUT = BASE_DIR / "downloads"
 HISTORY_F   = BASE_DIR / "processed_urls.json"
 
-FORMAT_VIDEO = "bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/best[acodec!=none]"
+FORMAT_VIDEO = "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^=avc1]+bestaudio/bestvideo+bestaudio/b"
 FORMAT_AUDIO = "bestaudio/best"
 MAX_WORKERS  = 3  # concurrent download threads
 
@@ -356,7 +356,23 @@ class App(tk.Tk):
         self._log("Ready. Paste a URL and click Download.", "muted")
         if YT_DLP_API_OK:
             self._log("yt-dlp Python API active — native progress callbacks enabled.", "muted")
+        if not self._check_ffmpeg():
+            self._log(
+                "WARNING: FFmpeg not found in PATH. Video+audio merging will fail — "
+                "install FFmpeg and ensure it is on your PATH.",
+                "warn",
+            )
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _check_ffmpeg(self) -> bool:
+        try:
+            subprocess.run(
+                ["ffmpeg", "-version"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            return True
+        except Exception:
+            return False
 
     def _on_close(self):
         _pw_manager.stop()
