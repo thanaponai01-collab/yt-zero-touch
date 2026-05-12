@@ -87,12 +87,13 @@ class App(tk.Tk):
         self._downloader.__enter__()
         self.history       = load_history(HISTORY_F)
         self._history_lock = threading.Lock()
-        self.cookie_file   = tk.StringVar()
-        self.out_dir       = tk.StringVar(value=str(DEFAULT_OUT))
-        self.audio_only    = tk.BooleanVar(value=False)
-        self.sub_en        = tk.BooleanVar(value=False)
-        self.sub_th        = tk.BooleanVar(value=False)
-        self.force_redl    = tk.BooleanVar(value=False)
+        self.cookie_file      = tk.StringVar()
+        self.browser_cookies  = tk.StringVar(value="none")
+        self.out_dir          = tk.StringVar(value=str(DEFAULT_OUT))
+        self.audio_only       = tk.BooleanVar(value=False)
+        self.sub_en           = tk.BooleanVar(value=False)
+        self.sub_th           = tk.BooleanVar(value=False)
+        self.force_redl       = tk.BooleanVar(value=False)
         self.downloading   = False
 
         self._build_ui()
@@ -136,7 +137,8 @@ class App(tk.Tk):
         tk.Label(hdr, text="YT-DLP  ZERO-TOUCH",
                  bg=COLORS["accent2"], fg=COLORS["accent"],
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0)
-        tk.Label(hdr, text="Paste a link — get the best quality MP4",
+        _ver = getattr(_yt_dlp, "__version__", "?") if YT_DLP_API_OK else "CLI"
+        tk.Label(hdr, text=f"Paste a link — get the best quality MP4  |  yt-dlp {_ver}",
                  bg=COLORS["accent2"], fg=COLORS["muted"],
                  font=("Segoe UI", 9)).grid(row=1, column=0)
 
@@ -190,10 +192,13 @@ class App(tk.Tk):
             row=0, column=1, padx=4, pady=2)
 
         # Cookies
-        tk.Label(ctrl, text="Cookies file  (optional — for login-required sites)",
+        ck_label_row = tk.Frame(ctrl, bg=COLORS["panel"])
+        ck_label_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        ck_label_row.columnconfigure(0, weight=1)
+        tk.Label(ck_label_row, text="Cookies  (optional — fixes PO token / login-required sites)",
                  bg=COLORS["panel"], fg=COLORS["muted"],
-                 font=("Segoe UI", 8)).grid(row=4, column=0,
-                 columnspan=2, sticky="w", pady=(0, 2))
+                 font=("Segoe UI", 8)).grid(row=0, column=0, sticky="w")
+
         ck_frame = tk.Frame(ctrl, bg=COLORS["input_bg"],
                             highlightbackground=COLORS["accent2"],
                             highlightthickness=1)
@@ -206,6 +211,22 @@ class App(tk.Tk):
                  ).grid(row=0, column=0, sticky="ew")
         self._small_btn(ck_frame, "Browse", self._browse_cookies).grid(
             row=0, column=1, padx=4, pady=2)
+
+        # Browser cookie extraction
+        browser_row = tk.Frame(ctrl, bg=COLORS["panel"])
+        browser_row.grid(row=5, column=2, sticky="e", padx=(8, 0), pady=(0, 12))
+        tk.Label(browser_row, text="or extract from:",
+                 bg=COLORS["panel"], fg=COLORS["muted"],
+                 font=("Segoe UI", 8)).grid(row=0, column=0, padx=(0, 4))
+        browser_menu = tk.OptionMenu(browser_row, self.browser_cookies,
+                                     "none", "chrome", "firefox", "edge", "brave")
+        browser_menu.config(bg=COLORS["accent2"], fg=COLORS["text"],
+                            activebackground=COLORS["accent"],
+                            activeforeground="white",
+                            relief="flat", font=("Segoe UI", 8),
+                            highlightthickness=0, bd=0)
+        browser_menu["menu"].config(bg=COLORS["accent2"], fg=COLORS["text"])
+        browser_menu.grid(row=0, column=1)
 
         # Options + Download button
         opts = tk.Frame(ctrl, bg=COLORS["panel"])
@@ -237,6 +258,9 @@ class App(tk.Tk):
 
         self.open_btn = self._small_btn(opts, "Open folder", self._open_folder)
         self.open_btn.grid(row=0, column=6, sticky="e", padx=(0, 10))
+
+        self._small_btn(opts, "Update yt-dlp", self._update_ytdlp).grid(
+            row=0, column=5, sticky="e", padx=(0, 6))
 
         # ── Log ─────────────────────────────────────────────────────────
         log_frame = tk.Frame(self, bg=COLORS["bg"])
@@ -307,6 +331,47 @@ class App(tk.Tk):
         Path(path).mkdir(parents=True, exist_ok=True)
         os.startfile(path)
 
+    def _update_ytdlp(self):
+        import subprocess, threading, sys
+        self._log("Updating yt-dlp (nightly channel)…", "info")
+        NIGHTLY = ("yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds"
+                   "/releases/latest/download/yt-dlp.tar.gz")
+        def _version():
+            try:
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "show", "yt-dlp"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                for ln in r.stdout.splitlines():
+                    if ln.lower().startswith("version:"):
+                        return ln.split(":", 1)[1].strip()
+            except Exception:
+                pass
+            return "unknown"
+        def _run():
+            before = _version()
+            self.after(0, self._log, f"Before: yt-dlp {before}", "muted")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-U", "--force-reinstall",
+                     "--no-deps", NIGHTLY],
+                    capture_output=True, text=True, timeout=180,
+                )
+                if result.returncode != 0:
+                    out = (result.stdout + result.stderr).strip()
+                    for line in out.splitlines()[-15:]:
+                        self.after(0, self._log, line, "error")
+                    return
+                after = _version()
+                if after != before:
+                    self.after(0, self._log, f"Updated: {before} → {after}", "success")
+                    self.after(0, self._log, "Restart the app to use the new version.", "warn")
+                else:
+                    self.after(0, self._log, f"Already at latest nightly ({after}).", "success")
+            except Exception as exc:
+                self.after(0, self._log, f"Update failed: {exc}", "error")
+        threading.Thread(target=_run, daemon=True).start()
+
     def _start_download(self):
         if self.downloading:
             return
@@ -332,8 +397,11 @@ class App(tk.Tk):
         out_dir     = Path(self.out_dir.get())
         audio_only  = self.audio_only.get()
         force_redl  = self.force_redl.get()
-        ck_path_str = self.cookie_file.get().strip()
-        cookie_file = Path(ck_path_str) if ck_path_str else None
+        ck_path_str    = self.cookie_file.get().strip()
+        cookie_file    = Path(ck_path_str) if ck_path_str else None
+        browser_cookie = self.browser_cookies.get()
+        if browser_cookie == "none":
+            browser_cookie = None
         sub_langs   = [lang for lang, var in (("en", self.sub_en), ("th", self.sub_th))
                        if var.get()]
 
@@ -386,7 +454,7 @@ class App(tk.Tk):
             futures = {
                 executor.submit(
                     self._download_one,
-                    idx, url, resolved, tpl, out_dir, audio_only, sub_langs, cookie_file,
+                    idx, url, resolved, tpl, out_dir, audio_only, sub_langs, cookie_file, browser_cookie,
                 ): (idx, url)
                 for idx, url, resolved, tpl in work_items
             }
@@ -425,6 +493,7 @@ class App(tk.Tk):
         audio_only: bool,
         sub_langs: list[str],
         cookie_file: "Path | None",
+        browser_cookie: "str | None" = None,
     ) -> bool:
         prefix = f"[#{idx}]"
 
@@ -446,11 +515,11 @@ class App(tk.Tk):
 
             if YT_DLP_API_OK:
                 ok = self._download_via_api(
-                    resolved, out_dir / tpl, fmt, audio_only, sub_langs, cookie_file, log
+                    resolved, out_dir / tpl, fmt, audio_only, sub_langs, cookie_file, browser_cookie, log
                 )
             else:
                 ok = self._download_via_subprocess(
-                    resolved, out_dir, tpl, fmt, audio_only, sub_langs, cookie_file, log
+                    resolved, out_dir, tpl, fmt, audio_only, sub_langs, cookie_file, browser_cookie, log
                 )
 
             if ok:
@@ -481,6 +550,7 @@ class App(tk.Tk):
         audio_only: bool,
         sub_langs: list[str],
         cookie_file: "Path | None",
+        browser_cookie: "str | None",
         log,
     ) -> bool:
         """Download using the yt_dlp Python API — no subprocess, native progress."""
@@ -543,7 +613,7 @@ class App(tk.Tk):
             "addmetadata":                   True,
             "writethumbnail":                True,
             "sponsorblock_mark":             "all",
-            "restrictfilenames":             True,
+            "restrictfilenames":             False,
             "windowsfilenames":              True,
             "ignoreerrors":                  True,
             "quiet":                         True,
@@ -554,6 +624,12 @@ class App(tk.Tk):
             "concurrent_fragment_downloads": 4,
             "retries":                       10,
             "fragment_retries":              10,
+            # tv_simply + android_vr don't require PO tokens or JS challenge solving
+            # and avoid the DRM experiment that hits the regular tv client.
+            "extractor_args":                {"youtube": {
+                "player_client":      ["tv_simply", "android_vr", "tv", "web"],
+                "remote_components":  ["ejs:github"],  # auto-fetch JS solver
+            }},
         }
         if sub_langs:
             ydl_opts.update({
@@ -564,6 +640,8 @@ class App(tk.Tk):
             })
         if cookie_file and cookie_file.exists():
             ydl_opts["cookiefile"] = str(cookie_file)
+        elif browser_cookie:
+            ydl_opts["cookiesfrombrowser"] = (browser_cookie,)
 
         try:
             with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -582,6 +660,7 @@ class App(tk.Tk):
         audio_only: bool,
         sub_langs: list[str],
         cookie_file: "Path | None",
+        browser_cookie: "str | None",
         log,
     ) -> bool:
         """Fallback: shell out to yt-dlp CLI (used when yt_dlp package not installed)."""
@@ -595,7 +674,6 @@ class App(tk.Tk):
             "--embed-metadata",
             "--embed-thumbnail",
             "--sponsorblock-mark", "all",
-            "--restrict-filenames",
             "--windows-filenames",
             "--ignore-errors",
             "--newline",
@@ -603,6 +681,8 @@ class App(tk.Tk):
             "--concurrent-fragments", "4",
             "--retries", "10",
             "--fragment-retries", "10",
+            "--extractor-args", "youtube:player_client=tv_simply,android_vr,tv,web",
+            "--remote-components", "ejs:github",
         ]
         if sub_langs:
             cmd += [
@@ -615,6 +695,8 @@ class App(tk.Tk):
             cmd.insert(cmd.index("--merge-output-format"), "--extract-audio")
         if cookie_file and cookie_file.exists():
             cmd.extend(["--cookies", str(cookie_file)])
+        elif browser_cookie:
+            cmd.extend(["--cookies-from-browser", browser_cookie])
         cmd.append(resolved)
 
         log(f"  cmd: {' '.join(cmd)}", "cmd")

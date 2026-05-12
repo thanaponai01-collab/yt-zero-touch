@@ -55,9 +55,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 FORMAT_VIDEO = (
-    "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]"
-    "/bestvideo[vcodec^=avc1]+bestaudio"
-    "/bestvideo+bestaudio/b"
+    "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+    "/bestvideo+bestaudio"
+    "/best"
 )
 FORMAT_AUDIO = "bestaudio/best"
 
@@ -491,8 +491,12 @@ def _download_api(
         "concurrent_fragment_downloads": 4,
         "retries":                       10,
         "fragment_retries":              10,
-        # Use ios client — works for Shorts and doesn't require a JS runtime
-        "extractor_args":                {"youtube": {"player_client": ["ios", "web"]}},
+        # tv_simply + android_vr don't require PO tokens or JS challenge solving
+        # and avoid the DRM experiment that hits the regular tv client.
+        "extractor_args":                {"youtube": {
+            "player_client":     ["tv_simply", "android_vr", "tv", "web"],
+            "remote_components": ["ejs:github"],
+        }},
     }
     if sub_langs:
         ydl_opts.update({
@@ -538,8 +542,9 @@ def _download_subprocess(
         "--socket-timeout", "60",
         "--concurrent-fragments", "4",
         "--retries", "10", "--fragment-retries", "10",
-        # Use ios client — works for Shorts and doesn't require a JS runtime
-        "--extractor-args", "youtube:player_client=ios,web",
+        # tv_simply + android_vr don't require PO tokens or JS challenge solving
+        "--extractor-args", "youtube:player_client=tv_simply,android_vr,tv,web",
+        "--remote-components", "ejs:github",
     ]
     if not playlist:
         cmd.append("--no-playlist")
