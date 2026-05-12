@@ -355,10 +355,13 @@ def download(
     write_metadata: bool = True,
     sub_langs: "list[str] | None" = None,
     cookie_file: "Path | str | None" = None,
+    browser_cookie: "str | None" = None,
     force: bool = False,
     fmt: "str | None" = None,
     out_template: "str | None" = None,
     log: LogFn = _print_log,
+    progress_hook: "Callable[[dict], None] | None" = None,
+    pre_resolved: bool = False,
     _browser=None,
 ) -> bool:
     """Download a single URL (or full playlist).
@@ -371,10 +374,14 @@ def download(
         write_metadata: Write a .info.json sidecar next to each file.
         sub_langs:      Subtitle language codes, e.g. ["en", "th"].
         cookie_file:    Path to Netscape cookies.txt.
+        browser_cookie: Browser name for yt-dlp's --cookies-from-browser (chrome/firefox/edge/brave).
         force:          Re-download even if file already exists.
         fmt:            Override yt-dlp format string.
         out_template:   Override yt-dlp -o template (relative to out_dir).
         log:            Callable(msg, tag) for progress output.
+        progress_hook:  Optional yt-dlp progress_hook (called with dict containing
+                        status/_percent_str/_speed_str/_eta_str/filename).
+        pre_resolved:   If True, skip resolve_url() — caller already resolved.
         _browser:       Pass an open Playwright browser to reuse (advanced).
 
     Returns:
@@ -401,19 +408,22 @@ def download(
             return True
         log("gdown failed — falling back to yt-dlp", "warn")
 
-    log(f"Resolving: {url[:80]}", "info")
-    resolved = resolve_url(url, cookie_file=cookie_file, log=log, _browser=_browser)
+    if pre_resolved:
+        resolved = url
+    else:
+        log(f"Resolving: {url[:80]}", "info")
+        resolved = resolve_url(url, cookie_file=cookie_file, log=log, _browser=_browser)
 
     outtmpl = out_dir / tpl
 
     if _YT_DLP_API_OK:
         return _download_api(
             resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
-            sub_langs, cookie_file, log,
+            sub_langs, cookie_file, browser_cookie, log, progress_hook,
         )
     return _download_subprocess(
         resolved, out_dir, tpl, fmt, audio_only, playlist, write_metadata,
-        sub_langs, cookie_file, log,
+        sub_langs, cookie_file, browser_cookie, log,
     )
 
 
@@ -426,7 +436,9 @@ def _download_api(
     write_metadata: bool,
     sub_langs: list,
     cookie_file: "Path | None",
+    browser_cookie: "str | None",
     log: LogFn,
+    extra_progress_hook: "Callable[[dict], None] | None" = None,
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -485,7 +497,7 @@ def _download_api(
         "ignoreerrors":                  True,
         "quiet":                         True,
         "logger":                        _Logger(),
-        "progress_hooks":                [_progress],
+        "progress_hooks":                [_progress] + ([extra_progress_hook] if extra_progress_hook else []),
         "postprocessors":                postprocessors,
         "socket_timeout":                60,
         "concurrent_fragment_downloads": 4,
@@ -507,6 +519,8 @@ def _download_api(
         })
     if cookie_file and cookie_file.exists():
         ydl_opts["cookiefile"] = str(cookie_file)
+    elif browser_cookie:
+        ydl_opts["cookiesfrombrowser"] = (browser_cookie,)
 
     try:
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -527,6 +541,7 @@ def _download_subprocess(
     write_metadata: bool,
     sub_langs: list,
     cookie_file: "Path | None",
+    browser_cookie: "str | None",
     log: LogFn,
 ) -> bool:
     cmd = [
@@ -560,6 +575,8 @@ def _download_subprocess(
         cmd.insert(cmd.index("--merge-output-format"), "--extract-audio")
     if cookie_file and cookie_file.exists():
         cmd.extend(["--cookies", str(cookie_file)])
+    elif browser_cookie:
+        cmd.extend(["--cookies-from-browser", browser_cookie])
     cmd.append(resolved)
 
     log(f"  cmd: {' '.join(cmd)}", "info")
@@ -642,9 +659,13 @@ class Downloader:
         write_metadata: bool = True,
         sub_langs: "list[str] | None" = None,
         cookie_file: "Path | str | None" = None,
+        browser_cookie: "str | None" = None,
         force: bool = False,
         fmt: "str | None" = None,
         out_template: "str | None" = None,
+        log: "LogFn | None" = None,
+        progress_hook: "Callable[[dict], None] | None" = None,
+        pre_resolved: bool = False,
     ) -> bool:
         """Same as module-level download(), but reuses the shared browser."""
         ck = cookie_file or self.cookie_file
@@ -658,10 +679,13 @@ class Downloader:
             write_metadata=write_metadata,
             sub_langs=sub_langs,
             cookie_file=ck,
+            browser_cookie=browser_cookie,
             force=force,
             fmt=fmt,
             out_template=out_template,
-            log=self.log,
+            log=log or self.log,
+            progress_hook=progress_hook,
+            pre_resolved=pre_resolved,
             _browser=browser,
         )
 

@@ -17,7 +17,6 @@ from pathlib import Path
 from datetime import datetime
 
 from ytdlp_skill import (
-    FORMAT_VIDEO, FORMAT_AUDIO,
     resolve_url,
     load_history, save_history,
     Downloader,
@@ -500,37 +499,48 @@ class App(tk.Tk):
         def base_log(msg: str, tag: str = "info"):
             self._log(f"{prefix} {msg}", tag)
 
-        fmt = FORMAT_AUDIO if audio_only else FORMAT_VIDEO
+        def progress_hook(d: dict):
+            if d["status"] == "downloading":
+                pct   = d.get("_percent_str", "").strip()
+                speed = d.get("_speed_str", "?").strip()
+                eta   = d.get("_eta_str", "?").strip()
+                self.after(0, lambda p=pct, s=speed, e=eta:
+                    self.status_var.set(f"Downloading  {p}  •  {s}  •  ETA {e}"))
+            elif d["status"] == "finished":
+                self.after(0, lambda: self.status_var.set("Merging…"))
+
         base_log(f"Starting: {url[:80]}", "accent")
 
         # Retry loop with exponential backoff
         for attempt in range(1, RETRY_MAX + 2):
             captured_errors = []
 
-            # Create a capturing log function for this attempt
             def log(msg: str, tag: str = "info"):
                 base_log(msg, tag)
                 if tag == "error":
                     captured_errors.append(msg)
 
-            if YT_DLP_API_OK:
-                ok = self._download_via_api(
-                    resolved, out_dir / tpl, fmt, audio_only, sub_langs, cookie_file, browser_cookie, log
-                )
-            else:
-                ok = self._download_via_subprocess(
-                    resolved, out_dir, tpl, fmt, audio_only, sub_langs, cookie_file, browser_cookie, log
-                )
+            ok = self._downloader.download(
+                resolved,
+                out_dir=out_dir,
+                audio_only=audio_only,
+                write_metadata=False,
+                sub_langs=sub_langs,
+                cookie_file=cookie_file,
+                browser_cookie=browser_cookie,
+                out_template=tpl,
+                log=log,
+                progress_hook=progress_hook,
+                pre_resolved=True,
+            )
 
             if ok:
                 return True
 
-            # Check if this is a permanent error
             if self._is_permanent_error(captured_errors):
                 base_log("  Permanent error — not retrying", "error")
                 return False
 
-            # If more retries remain, wait before next attempt
             if attempt <= RETRY_MAX:
                 delay = RETRY_DELAYS[attempt - 1]
                 base_log(f"  Attempt {attempt} failed — retrying in {delay}s…", "warn")
@@ -541,189 +551,6 @@ class App(tk.Tk):
 
         base_log(f"  All {RETRY_MAX + 1} attempts failed.", "error")
         return False
-
-    def _download_via_api(
-        self,
-        resolved: str,
-        outtmpl: Path,
-        fmt: str,
-        audio_only: bool,
-        sub_langs: list[str],
-        cookie_file: "Path | None",
-        browser_cookie: "str | None",
-        log,
-    ) -> bool:
-        """Download using the yt_dlp Python API — no subprocess, native progress."""
-
-        class _Logger:
-            def __init__(self, fn):
-                self._fn = fn
-            def debug(self, msg):
-                if not msg.startswith("[debug]"):
-                    self._fn(f"  {msg}", "muted")
-            def info(self, msg):
-                self._fn(f"  {msg}", "muted")
-            def warning(self, msg):
-                self._fn(f"  {msg}", "warn")
-            def error(self, msg):
-                self._fn(f"  {msg}", "error")
-
-        last_milestone = [-1]
-
-        def _progress(d: dict):
-            if d["status"] == "downloading":
-                pct_str = d.get("_percent_str", "").strip().rstrip("%")
-                speed   = d.get("_speed_str", "?").strip()
-                eta     = d.get("_eta_str", "?").strip()
-                try:
-                    milestone = (int(float(pct_str)) // 10) * 10
-                except (ValueError, TypeError):
-                    return
-                # Update status bar with live speed on every tick
-                self.after(0, lambda s=speed, e=eta, p=pct_str:
-                    self.status_var.set(f"Downloading  {p}%  •  {s}  •  ETA {e}"))
-                if milestone != last_milestone[0]:
-                    last_milestone[0] = milestone
-                    log(f"  {milestone}%  {speed}  ETA {eta}", "success")
-            elif d["status"] == "finished":
-                name = Path(d.get("filename", "")).name
-                log(f"  Finished: {name}", "success")
-                self.after(0, lambda: self.status_var.set("Merging…"))
-
-        postprocessors = [
-            {"key": "FFmpegMetadata", "add_metadata": True, "add_chapters": True},
-            {"key": "EmbedThumbnail", "already_have_thumbnail": False},
-        ]
-        if sub_langs:
-            postprocessors.append(
-                {"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"}
-            )
-        if audio_only:
-            postprocessors.insert(
-                0,
-                {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
-            )
-
-        ydl_opts: dict = {
-            "format":                        fmt,
-            "outtmpl":                       str(outtmpl),
-            "noplaylist":                    True,
-            "merge_output_format":           "opus" if audio_only else "mp4",
-            "overwrites":                    False,
-            "addmetadata":                   True,
-            "writethumbnail":                True,
-            "sponsorblock_mark":             "all",
-            "restrictfilenames":             False,
-            "windowsfilenames":              True,
-            "ignoreerrors":                  True,
-            "quiet":                         True,
-            "logger":                        _Logger(log),
-            "progress_hooks":                [_progress],
-            "postprocessors":                postprocessors,
-            "socket_timeout":                60,
-            "concurrent_fragment_downloads": 4,
-            "retries":                       10,
-            "fragment_retries":              10,
-            # tv_simply + android_vr don't require PO tokens or JS challenge solving
-            # and avoid the DRM experiment that hits the regular tv client.
-            "extractor_args":                {"youtube": {
-                "player_client":      ["tv_simply", "android_vr", "tv", "web"],
-                "remote_components":  ["ejs:github"],  # auto-fetch JS solver
-            }},
-        }
-        if sub_langs:
-            ydl_opts.update({
-                "writesubtitles":    True,
-                "writeautomaticsub": True,
-                "subtitleslangs":    sub_langs,
-                "subtitlesformat":   "srt",
-            })
-        if cookie_file and cookie_file.exists():
-            ydl_opts["cookiefile"] = str(cookie_file)
-        elif browser_cookie:
-            ydl_opts["cookiesfrombrowser"] = (browser_cookie,)
-
-        try:
-            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ret = ydl.download([resolved])
-            return ret == 0
-        except Exception as exc:
-            log(f"  yt-dlp API error: {exc}", "error")
-            return False
-
-    def _download_via_subprocess(
-        self,
-        resolved: str,
-        out_dir: Path,
-        tpl: str,
-        fmt: str,
-        audio_only: bool,
-        sub_langs: list[str],
-        cookie_file: "Path | None",
-        browser_cookie: "str | None",
-        log,
-    ) -> bool:
-        """Fallback: shell out to yt-dlp CLI (used when yt_dlp package not installed)."""
-        cmd = [
-            "yt-dlp",
-            "--no-playlist",
-            "-f", fmt,
-            "--merge-output-format", "opus" if audio_only else "mp4",
-            "-o", str(out_dir / tpl),
-            "--no-overwrites",
-            "--embed-metadata",
-            "--embed-thumbnail",
-            "--sponsorblock-mark", "all",
-            "--windows-filenames",
-            "--ignore-errors",
-            "--newline",
-            "--socket-timeout", "60",
-            "--concurrent-fragments", "4",
-            "--retries", "10",
-            "--fragment-retries", "10",
-            "--extractor-args", "youtube:player_client=tv_simply,android_vr,tv,web",
-            "--remote-components", "ejs:github",
-        ]
-        if sub_langs:
-            cmd += [
-                "--write-subs", "--write-auto-subs",
-                "--sub-langs", ",".join(sub_langs),
-                "--sub-format", "srt",
-                "--convert-subs", "srt",
-            ]
-        if audio_only:
-            cmd.insert(cmd.index("--merge-output-format"), "--extract-audio")
-        if cookie_file and cookie_file.exists():
-            cmd.extend(["--cookies", str(cookie_file)])
-        elif browser_cookie:
-            cmd.extend(["--cookies-from-browser", browser_cookie])
-        cmd.append(resolved)
-
-        log(f"  cmd: {' '.join(cmd)}", "cmd")
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1,
-            )
-            for line in proc.stdout:
-                line = line.rstrip()
-                if not line:
-                    continue
-                tag = "info"
-                if line.startswith("[download]"):
-                    tag = "success"
-                elif "ERROR" in line or "error" in line.lower():
-                    tag = "error"
-                elif "WARNING" in line:
-                    tag = "warn"
-                elif line.startswith("["):
-                    tag = "muted"
-                log(f"  {line}", tag)
-            proc.wait()
-            return proc.returncode == 0
-        except Exception as exc:
-            log(f"  Error: {exc}", "error")
-            return False
 
     def _reset_btn(self):
         self.dl_btn.config(state="normal", text="  ▶  DOWNLOAD  ")
