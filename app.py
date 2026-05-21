@@ -28,6 +28,12 @@ try:
 except ImportError:
     YT_DLP_API_OK = False
 
+try:
+    from plyer import notification as _plyer_notification
+    _NOTIFY_OK = True
+except ImportError:
+    _NOTIFY_OK = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -487,6 +493,13 @@ class App(tk.Tk):
                     self._log(f"  [#{idx}] Download failed.", "error")
 
         self.downloading = False
+        failed = total - done[0]
+        if failed == 0:
+            self._notify("Download complete",
+                         f"{done[0]} file{'s' if done[0] != 1 else ''} saved to {out_dir.name}")
+        else:
+            self._notify("Download finished with errors",
+                         f"{done[0]} succeeded, {failed} failed — check the log")
         self.after(0, self._reset_btn)
 
     def _is_permanent_error(self, messages: list[str]) -> bool:
@@ -563,6 +576,19 @@ class App(tk.Tk):
 
         base_log(f"  All {RETRY_MAX + 1} attempts failed.", "error")
         return False
+
+    def _notify(self, title: str, message: str):
+        if not _NOTIFY_OK:
+            return
+        try:
+            _plyer_notification.notify(
+                title=title,
+                message=message,
+                app_name="YT-DLP Zero-Touch",
+                timeout=6,
+            )
+        except Exception:
+            pass
 
     def _reset_btn(self):
         self.dl_btn.config(state="normal", text="  ▶  DOWNLOAD  ")
