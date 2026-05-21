@@ -94,6 +94,7 @@ class App(tk.Tk):
         self.sub_th           = tk.BooleanVar(value=False)
         self.force_redl       = tk.BooleanVar(value=False)
         self.downloading   = False
+        self._updating     = False
 
         self._build_ui()
         self._log("Ready. Paste a URL and click Download.", "muted")
@@ -331,7 +332,11 @@ class App(tk.Tk):
         os.startfile(path)
 
     def _update_ytdlp(self):
+        if self._updating:
+            self._log("Update already in progress…", "warn")
+            return
         import subprocess, threading, sys
+        self._updating = True
         self._log("Updating yt-dlp (nightly channel)…", "info")
         NIGHTLY = ("yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds"
                    "/releases/latest/download/yt-dlp.tar.gz")
@@ -358,8 +363,13 @@ class App(tk.Tk):
                 )
                 if result.returncode != 0:
                     out = (result.stdout + result.stderr).strip()
-                    for line in out.splitlines()[-15:]:
-                        self.after(0, self._log, line, "error")
+                    if "WinError 32" in out or "being used by another process" in out:
+                        self.after(0, self._log,
+                            "Update failed: yt-dlp files are locked. "
+                            "Close the app, run the update from a terminal, then reopen.", "error")
+                    else:
+                        for line in out.splitlines()[-15:]:
+                            self.after(0, self._log, line, "error")
                     return
                 after = _version()
                 if after != before:
@@ -369,6 +379,8 @@ class App(tk.Tk):
                     self.after(0, self._log, f"Already at latest nightly ({after}).", "success")
             except Exception as exc:
                 self.after(0, self._log, f"Update failed: {exc}", "error")
+            finally:
+                self._updating = False
         threading.Thread(target=_run, daemon=True).start()
 
     def _start_download(self):

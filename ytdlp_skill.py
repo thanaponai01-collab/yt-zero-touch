@@ -55,7 +55,11 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 FORMAT_VIDEO = (
-    "bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]"
+    "/bestvideo[ext=mp4][vcodec!^=av01]+bestaudio[ext=m4a]"
+    "/bestvideo[vcodec!^=av01]+bestaudio[ext=m4a]"
+    "/bestvideo[vcodec!^=av01]+bestaudio"
+    "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
     "/bestvideo+bestaudio"
     "/best"
 )
@@ -334,7 +338,6 @@ def _download_gdrive(file_id: str, out_dir: Path, log: LogFn) -> bool:
             gdrive_url,
             output=str(out_dir) + "/",
             quiet=False,
-            fuzzy=True,
         )
         if output:
             log(f"Saved: {Path(output).name}", "success")

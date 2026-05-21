@@ -2,6 +2,29 @@
 
 ---
 
+## 2026-05-15
+
+**Summary:** Fixed gdown `fuzzy` API breakage for Google Drive downloads and prevented concurrent yt-dlp update crashes.
+
+**Done:**
+- `ytdlp_skill.py:337` — Removed `fuzzy=True` from `_gdown.download()` call (gdown 6.x dropped the parameter)
+- `app.py:96` — Added `self._updating = False` guard flag to prevent concurrent pip update runs
+- `app.py:333` — `_update_ytdlp()`: gate on `_updating` flag, added WinError 32 detection with clear actionable error message, added `finally` block to always reset the flag
+- Ran yt-dlp nightly update from terminal — confirmed already at `2026.5.5.233942` (latest)
+
+**Decisions:**
+- Removed `fuzzy=True` without replacement — gdown 6.x handles URL normalization internally, no substitute parameter needed
+- WinError 32 (file locked by running process) is surfaced as a human-readable message rather than a raw pip traceback
+
+**Errors/Fixes:**
+- `gdown error: download() got an unexpected keyword argument 'fuzzy'` — caused by gdown 6.0 API change; fixed by removing the argument
+- `ERROR: [WinError 32] The process cannot access the file` — caused by double-clicking Update button, spawning two concurrent pip processes; fixed with guard flag
+
+**Left to do / Follow-up:**
+- Google Drive 403 errors on yt-dlp fallback — those files are private/restricted; would need Google auth (cookies or service account) to download them
+
+---
+
 ## 2026-05-07
 
 **Summary:** Fixed YouTube Shorts download failure, added Google Drive support, Thai filename fix, and major watcher/skill robustness overhaul.
