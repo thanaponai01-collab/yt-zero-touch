@@ -65,6 +65,42 @@ FORMAT_VIDEO = (
 )
 FORMAT_AUDIO = "bestaudio/best"
 
+# Quality presets — prefer H.264 + AAC (Premiere-ready) at each resolution.
+# Falls back to any codec so the download always succeeds, then the merger
+# step re-encodes audio to AAC regardless of what was selected.
+QUALITY_PRESETS: dict[str, str] = {
+    "Best": (
+        "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]"
+        "/bestvideo[vcodec^=avc1]+bestaudio"
+        "/bestvideo+bestaudio/best"
+    ),
+    "1080p": (
+        "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]"
+        "/bestvideo[height<=1080][vcodec^=avc1]+bestaudio"
+        "/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+    ),
+    "720p": (
+        "bestvideo[height<=720][vcodec^=avc1]+bestaudio[ext=m4a]"
+        "/bestvideo[height<=720][vcodec^=avc1]+bestaudio"
+        "/bestvideo[height<=720]+bestaudio/best[height<=720]"
+    ),
+    "480p": (
+        "bestvideo[height<=480][vcodec^=avc1]+bestaudio[ext=m4a]"
+        "/bestvideo[height<=480]+bestaudio/best[height<=480]"
+    ),
+}
+
+# FFmpeg args applied during the video+audio merge step.
+# -c:v copy  → keep H.264 as-is (no re-encode, fast)
+# -c:a aac   → always output AAC audio (Opus/Vorbis → AAC if needed)
+# -b:a 192k  → good broadcast-quality audio bitrate
+# -movflags +faststart → move MP4 index to front for instant Premiere import
+PREMIERE_MERGE_ARGS = [
+    "-c:v", "copy",
+    "-c:a", "aac", "-b:a", "192k",
+    "-movflags", "+faststart",
+]
+
 # ---------------------------------------------------------------------------
 # Internal constants
 # ---------------------------------------------------------------------------
@@ -184,16 +220,35 @@ def _brightcove_from_page(url: str, cookie_file: "Path | None") -> "str | None":
     return None
 
 
-def _launch_temp_browser():
-    pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
-    browser._pw_ref = pw  # keep pw alive
-    return browser
+class _TempBrowser:
+    """One-shot Playwright browser; close() shuts down both Chromium and the Playwright context."""
+
+    def __init__(self):
+        self._pw     = sync_playwright().start()
+        self.browser = self._pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+
+    def close(self):
+        try:
+            self.browser.close()
+        except Exception:
+            pass
+        try:
+            self._pw.stop()
+        except Exception:
+            pass
+
+    def __getattr__(self, name: str):
+        return getattr(self.browser, name)
+
+
+def _launch_temp_browser() -> "_TempBrowser":
+    return _TempBrowser()
 
 
 def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "str | None":
     log("Launching headless browser to intercept stream…", "muted")
     captured = []
+    all_urls: list[str] = []
 
     ctx = browser.new_context(user_agent=_USER_AGENT)
     if cookie_file and cookie_file.exists():
@@ -207,19 +262,21 @@ def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "st
         lambda r: r.abort() if r.request.resource_type in _BLOCK_RESOURCES else r.continue_(),
     )
     page.add_init_script(_outseta_js(cookie_file))
-    page.on(
-        "request",
-        lambda req: captured.append(req.url)
-        if _STREAM_RE.search(req.url) and not any(x in req.url for x in _IGNORE_STREAM)
-        else None,
-    )
+
+    def _on_request(req):
+        u = req.url
+        all_urls.append(u)
+        if _STREAM_RE.search(u) and not any(x in u for x in _IGNORE_STREAM):
+            captured.append(u)
+
+    page.on("request", _on_request)
 
     try:
         page.goto(url, wait_until="load", timeout=30_000)
     except Exception:
         pass
 
-    elapsed, limit, step = 0, 10_000, 500
+    elapsed, limit, step = 0, 15_000, 500
     while not captured and elapsed < limit:
         page.wait_for_timeout(step)
         elapsed += step
@@ -228,7 +285,9 @@ def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "st
     ctx.close()
 
     if not captured:
-        log("No stream URL intercepted", "warn")
+        # Log all seen domains to help diagnose what the page is requesting
+        seen_hosts = sorted({u.split("/")[2] for u in all_urls if u.startswith("http")})
+        log(f"No stream URL intercepted. Hosts seen: {', '.join(seen_hosts) or '(none)'}", "warn")
         return None
 
     for u in captured:
@@ -502,16 +561,24 @@ def _download_api(
         "logger":                        _Logger(),
         "progress_hooks":                [_progress] + ([extra_progress_hook] if extra_progress_hook else []),
         "postprocessors":                postprocessors,
+        # Force H.264+AAC in the merge step so Premiere Pro can open the file
+        # without re-encoding.  c:v copy keeps H.264 as-is; c:a aac converts
+        # any Opus/Vorbis audio to AAC.  Skipped for audio-only downloads.
+        **({"postprocessor_args": {"merger": PREMIERE_MERGE_ARGS}} if not audio_only else {}),
         "socket_timeout":                60,
         "concurrent_fragment_downloads": 4,
         "retries":                       10,
         "fragment_retries":              10,
         # tv_simply + android_vr don't require PO tokens or JS challenge solving
         # and avoid the DRM experiment that hits the regular tv client.
-        "extractor_args":                {"youtube": {
-            "player_client":     ["tv_simply", "android_vr", "tv", "web"],
-            "remote_components": ["ejs:github"],
-        }},
+        # generic:impersonate retries with browser impersonation on Cloudflare 403s.
+        "extractor_args":                {
+            "youtube": {
+                "player_client":     ["tv_simply", "android_vr", "android", "web"],
+                "remote_components": ["ejs:github"],
+            },
+            "generic": {"impersonate": [""]},
+        },
     }
     if sub_langs:
         ydl_opts.update({
@@ -561,9 +628,14 @@ def _download_subprocess(
         "--concurrent-fragments", "4",
         "--retries", "10", "--fragment-retries", "10",
         # tv_simply + android_vr don't require PO tokens or JS challenge solving
-        "--extractor-args", "youtube:player_client=tv_simply,android_vr,tv,web",
+        # generic:impersonate retries with browser impersonation on Cloudflare 403s.
+        "--extractor-args", "youtube:player_client=tv_simply,android_vr,android,web",
+        "--extractor-args", "generic:impersonate",
         "--remote-components", "ejs:github",
     ]
+    if not audio_only:
+        cmd += ["--postprocessor-args",
+                "merger:-c:v copy -c:a aac -b:a 192k -movflags +faststart"]
     if not playlist:
         cmd.append("--no-playlist")
     if write_metadata:

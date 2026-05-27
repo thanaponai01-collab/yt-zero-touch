@@ -20,6 +20,8 @@ from ytdlp_skill import (
     resolve_url,
     load_history, save_history,
     Downloader,
+    QUALITY_PRESETS,
+    _launch_temp_browser, _PLAYWRIGHT_OK,
 )
 
 try:
@@ -89,13 +91,12 @@ class App(tk.Tk):
         self.resizable(True, True)
 
         self._downloader   = Downloader()
-        self._downloader.__enter__()
         self.history       = load_history(HISTORY_F)
         self._history_lock = threading.Lock()
         self.cookie_file      = tk.StringVar()
         self.browser_cookies  = tk.StringVar(value="none")
         self.out_dir          = tk.StringVar(value=str(DEFAULT_OUT))
-        self.audio_only       = tk.BooleanVar(value=False)
+        self.quality          = tk.StringVar(value="Best")
         self.sub_en           = tk.BooleanVar(value=False)
         self.sub_th           = tk.BooleanVar(value=False)
         self.force_redl       = tk.BooleanVar(value=False)
@@ -144,7 +145,7 @@ class App(tk.Tk):
                  bg=COLORS["accent2"], fg=COLORS["accent"],
                  font=("Segoe UI", 18, "bold")).grid(row=0, column=0)
         _ver = getattr(_yt_dlp, "__version__", "?") if YT_DLP_API_OK else "CLI"
-        tk.Label(hdr, text=f"Paste a link — get the best quality MP4  |  yt-dlp {_ver}",
+        tk.Label(hdr, text=f"Paste a link — choose quality — get a Premiere-ready MP4  |  yt-dlp {_ver}",
                  bg=COLORS["accent2"], fg=COLORS["muted"],
                  font=("Segoe UI", 9)).grid(row=1, column=0)
 
@@ -246,7 +247,20 @@ class App(tk.Tk):
                                   activebackground=COLORS["panel"],
                                   font=("Segoe UI", 9), cursor="hand2")
 
-        _ck(opts, "Audio only",  self.audio_only).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        # Quality dropdown
+        q_frame = tk.Frame(opts, bg=COLORS["panel"])
+        q_frame.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        tk.Label(q_frame, text="Quality:", bg=COLORS["panel"],
+                 fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
+        _quality_values = list(QUALITY_PRESETS.keys()) + ["Audio only"]
+        q_menu = tk.OptionMenu(q_frame, self.quality, *_quality_values)
+        q_menu.config(bg=COLORS["accent2"], fg=COLORS["text"],
+                      activebackground=COLORS["accent"], activeforeground="white",
+                      relief="flat", font=("Segoe UI", 8),
+                      highlightthickness=0, bd=0)
+        q_menu["menu"].config(bg=COLORS["accent2"], fg=COLORS["text"])
+        q_menu.pack(side="left")
+
         tk.Label(opts, text="Subtitles:", bg=COLORS["panel"],
                  fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=0, column=1, sticky="w")
         _ck(opts, "English", self.sub_en).grid(row=0, column=2, sticky="w", padx=(4, 4))
@@ -412,7 +426,9 @@ class App(tk.Tk):
 
     def _download_worker(self, urls: list[str]):
         out_dir     = Path(self.out_dir.get())
-        audio_only  = self.audio_only.get()
+        quality     = self.quality.get()
+        audio_only  = (quality == "Audio only")
+        fmt         = None if audio_only else QUALITY_PRESETS.get(quality)
         force_redl  = self.force_redl.get()
         ck_path_str    = self.cookie_file.get().strip()
         cookie_file    = Path(ck_path_str) if ck_path_str else None
@@ -426,31 +442,42 @@ class App(tk.Tk):
         pad = len(str(len(urls)))
 
         # ── Phase 1: Resolve all URLs sequentially (Playwright stays warm) ──
+        # Browser is created here, in the worker thread — Playwright's sync API
+        # binds its greenlet dispatcher to the creating thread, so passing a
+        # browser from the main thread causes "Cannot switch to a different thread".
+        _worker_browser = _launch_temp_browser() if _PLAYWRIGHT_OK else None
         work_items: list[tuple[int, str, str, str]] = []
-        for idx, url in enumerate(urls, 1):
-            ts = datetime.now().strftime("%H:%M:%S")
-            if url in self.history and not force_redl:
-                self._log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
-                continue
+        try:
+            for idx, url in enumerate(urls, 1):
+                ts = datetime.now().strftime("%H:%M:%S")
+                if url in self.history and not force_redl:
+                    self._log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
+                    continue
 
-            self._log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
-            resolved = resolve_url(
-                url, cookie_file=cookie_file, log=self._log,
-                _browser=self._downloader._browser,
-            )
+                self._log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
+                resolved = resolve_url(
+                    url, cookie_file=cookie_file, log=self._log,
+                    _browser=_worker_browser,
+                )
 
-            is_stream = resolved != url and (
-                ".m3u8" in resolved or (".mp4" in resolved and "?" in resolved)
-            )
-            num_prefix = f"{idx:0{pad}d} - " if len(urls) > 1 else ""
-            if is_stream:
-                slug = re.sub(r"[^\w\s-]", "", url.rstrip("/").split("/")[-1])
-                slug = re.sub(r"\s+", "-", slug)[:80] or "video"
-                tpl = f"{num_prefix}{slug}.%(ext)s"
-            else:
-                tpl = f"{num_prefix}%(title).100B - [%(id)s].%(ext)s"
+                is_stream = resolved != url and (
+                    ".m3u8" in resolved or (".mp4" in resolved and "?" in resolved)
+                )
+                num_prefix = f"{idx:0{pad}d} - " if len(urls) > 1 else ""
+                if is_stream:
+                    slug = re.sub(r"[^\w\s-]", "", url.rstrip("/").split("/")[-1])
+                    slug = re.sub(r"\s+", "-", slug)[:80] or "video"
+                    tpl = f"{num_prefix}{slug}.%(ext)s"
+                else:
+                    tpl = f"{num_prefix}%(title).100B - [%(id)s].%(ext)s"
 
-            work_items.append((idx, url, resolved, tpl))
+                work_items.append((idx, url, resolved, tpl))
+        finally:
+            if _worker_browser:
+                try:
+                    _worker_browser.close()
+                except Exception:
+                    pass
 
         if not work_items:
             self.downloading = False
@@ -471,7 +498,7 @@ class App(tk.Tk):
             futures = {
                 executor.submit(
                     self._download_one,
-                    idx, url, resolved, tpl, out_dir, audio_only, sub_langs, cookie_file, browser_cookie,
+                    idx, url, resolved, tpl, out_dir, audio_only, fmt, sub_langs, cookie_file, browser_cookie,
                 ): (idx, url)
                 for idx, url, resolved, tpl in work_items
             }
@@ -515,6 +542,7 @@ class App(tk.Tk):
         tpl: str,
         out_dir: Path,
         audio_only: bool,
+        fmt: "str | None",
         sub_langs: list[str],
         cookie_file: "Path | None",
         browser_cookie: "str | None" = None,
@@ -549,6 +577,7 @@ class App(tk.Tk):
                 resolved,
                 out_dir=out_dir,
                 audio_only=audio_only,
+                fmt=fmt,
                 write_metadata=False,
                 sub_langs=sub_langs,
                 cookie_file=cookie_file,
