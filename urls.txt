@@ -1,6 +1,3 @@
-# YT-DLP Zero-Touch Extraction
+# YT-DLP Zero-Touch — URL list
 # Paste video URLs below, one per line.
 # Lines starting with # are ignored.
-# Save the file and downloads start automatically.
-
-https://muvi.gg/go/f1tv/detail/1000007808

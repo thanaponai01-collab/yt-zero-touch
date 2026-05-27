@@ -18,3 +18,7 @@ cookies.txt
 # Env / secrets
 .env
 *.env
+
+# Claude Code local data
+memory.db
+.claude/
