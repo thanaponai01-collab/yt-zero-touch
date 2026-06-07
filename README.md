@@ -89,8 +89,12 @@ Downloads are saved to a `downloads/` folder next to the app by default.
 
 ```
 yt-zero-touch/
-├── app.py            # Tkinter GUI
-├── ytdlp_skill.py    # Download engine
+├── app.py            # Tkinter GUI (thin — collects inputs, renders callbacks)
+├── orchestrator.py   # UI-free batch runner: resolve, concurrency, retry, history
+├── ytdlp_skill.py    # Generic, reusable yt-dlp download engine
+├── resolver.py       # Site-specific URL resolution (F1/Brightcove/headless browser)
+├── watcher.py        # Alternative CLI front-end: watch urls.txt
+├── tests/            # Unit tests for the orchestrator logic
 ├── requirements.txt  # Python dependencies
 ├── install.bat       # First-time setup
 ├── run.bat           # Launch the app

@@ -31,8 +31,9 @@ from ytdlp_skill import (
     Downloader,
     load_history, save_history,
     check_disk_space, has_partial_files, check_dependencies,
-    _KNOWN_DOMAINS,
+    _KNOWN_DOMAINS, _print_log,
 )
+from orchestrator import download_with_retry, BatchPolicy
 
 # ---------------------------------------------------------------------------
 # URL detection
@@ -80,16 +81,28 @@ def _download_worker(
     out_dir: Path,
     audio_only: bool,
     playlist: bool,
+    sub_langs: list[str],
 ) -> bool:
-    """Run in a thread — returns True on success."""
-    return dl.download(
-        url,
-        out_dir=out_dir,
-        audio_only=audio_only,
-        playlist=playlist,
-        write_metadata=True,
-        sub_langs=["all"],
-    )
+    """Run in a thread — returns True on success.
+
+    Shares the orchestrator's retry + permanent-error classification with the
+    GUI so a fix to one reaches both.
+    """
+    policy = BatchPolicy(out_dir=out_dir)  # only retry_max/retry_delays are read here
+
+    def download_fn(log, progress_hook):
+        return dl.download(
+            url,
+            out_dir=out_dir,
+            audio_only=audio_only,
+            playlist=playlist,
+            write_metadata=True,
+            sub_langs=sub_langs,
+            log=log,
+            progress_hook=progress_hook,
+        )
+
+    return download_with_retry(download_fn, policy=policy, url=url, log=_print_log)
 
 
 def watch(
@@ -100,7 +113,9 @@ def watch(
     cookie_file: Path | None = None,
     max_workers: int = 3,
     playlist: bool = False,
+    sub_langs: list[str] | None = None,
 ):
+    sub_langs = sub_langs or []
     out_dir.mkdir(parents=True, exist_ok=True)
     history_file = out_dir / "processed_urls.json"
     history      = load_history(history_file)
@@ -132,6 +147,7 @@ def watch(
     print(f"  Output      : {out_dir.resolve()}")
     print(f"  Mode        : {'Audio only' if audio_only else 'H.264 video + audio'}")
     print(f"  Playlist    : {'yes' if playlist else 'no (single video)'}")
+    print(f"  Subtitles   : {', '.join(sub_langs) if sub_langs else 'none'}")
     print(f"  Concurrency : {max_workers} worker(s)")
     print(f"  Dry-run     : {dry_run}")
     cookie_label = str(cookie_file) if cookie_file else "none (no login)"
@@ -207,7 +223,7 @@ def watch(
                                 continue
 
                             future = executor.submit(
-                                _download_worker, dl, url, out_dir, audio_only, playlist
+                                _download_worker, dl, url, out_dir, audio_only, playlist, sub_langs
                             )
                             in_flight[url] = future
 
@@ -282,8 +298,14 @@ def main():
         default=3,
         help="Maximum concurrent downloads (default: 3)",
     )
+    parser.add_argument(
+        "--sub-langs",
+        default=None,
+        help="Comma-separated subtitle language codes, e.g. en,th (default: none)",
+    )
     args = parser.parse_args()
     cfile = Path(args.cookies) if args.cookies else None
+    sub_langs = [s.strip() for s in args.sub_langs.split(",")] if args.sub_langs else []
     watch(
         Path(args.file),
         Path(args.output),
@@ -292,6 +314,7 @@ def main():
         cookie_file=cfile,
         max_workers=args.max_workers,
         playlist=args.playlist,
+        sub_langs=sub_langs,
     )
 
 

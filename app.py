@@ -9,20 +9,12 @@ and saves to MP4 ready for Premiere Pro.
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import re
-import time
 from pathlib import Path
-from datetime import datetime
 
-from ytdlp_skill import (
-    resolve_url,
-    load_history, save_history,
-    Downloader,
-    QUALITY_PRESETS,
-    _launch_temp_browser, _PLAYWRIGHT_OK,
-)
+from ytdlp_skill import load_history, Downloader, QUALITY_PRESETS
+from orchestrator import run_batch, BatchPolicy
 
 try:
     import yt_dlp as _yt_dlp
@@ -45,19 +37,6 @@ DEFAULT_OUT = BASE_DIR / "downloads"
 HISTORY_F   = BASE_DIR / "processed_urls.json"
 
 MAX_WORKERS = 3  # concurrent download threads
-
-# Error recovery — retry on transient failures with exponential backoff
-RETRY_MAX    = 3           # max retry attempts after first failure
-RETRY_DELAYS = [5, 15, 30] # seconds to wait before each retry
-
-# Keywords in yt-dlp error output that indicate a permanent, non-retryable failure.
-_PERMANENT_ERR_KEYWORDS = [
-    "video unavailable", "has been removed", "private video",
-    "this video is not available", "geo",  # geo-restricted
-    "age", "sign in to confirm",           # age/login gate
-    "404", "not found", "403",             # HTTP perm failures
-    "no video formats", "no formats found",
-]
 
 COLORS = {
     "bg":        "#1a1a2e",
@@ -356,7 +335,6 @@ class App(tk.Tk):
             self._log("Update already in progress…", "warn")
             return
         import subprocess, threading, sys
-        self._updating = True
         self._log("Updating yt-dlp (nightly channel)…", "info")
         NIGHTLY = ("yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds"
                    "/releases/latest/download/yt-dlp.tar.gz")
@@ -373,6 +351,7 @@ class App(tk.Tk):
                 pass
             return "unknown"
         def _run():
+            self._updating = True
             before = _version()
             self.after(0, self._log, f"Before: yt-dlp {before}", "muted")
             try:
@@ -425,186 +404,47 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
 
     def _download_worker(self, urls: list[str]):
-        out_dir     = Path(self.out_dir.get())
-        quality     = self.quality.get()
-        audio_only  = (quality == "Audio only")
-        fmt         = None if audio_only else QUALITY_PRESETS.get(quality)
-        force_redl  = self.force_redl.get()
+        quality    = self.quality.get()
+        audio_only = (quality == "Audio only")
         ck_path_str    = self.cookie_file.get().strip()
-        cookie_file    = Path(ck_path_str) if ck_path_str else None
         browser_cookie = self.browser_cookies.get()
-        if browser_cookie == "none":
-            browser_cookie = None
-        sub_langs   = [lang for lang, var in (("en", self.sub_en), ("th", self.sub_th))
-                       if var.get()]
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pad = len(str(len(urls)))
+        policy = BatchPolicy(
+            out_dir=Path(self.out_dir.get()),
+            audio_only=audio_only,
+            fmt=None if audio_only else QUALITY_PRESETS.get(quality),
+            sub_langs=[lang for lang, var in (("en", self.sub_en), ("th", self.sub_th))
+                       if var.get()],
+            cookie_file=Path(ck_path_str) if ck_path_str else None,
+            browser_cookie=None if browser_cookie == "none" else browser_cookie,
+            force=self.force_redl.get(),
+            write_metadata=False,
+            max_workers=MAX_WORKERS,
+        )
 
-        # ── Phase 1: Resolve all URLs sequentially (Playwright stays warm) ──
-        # Browser is created here, in the worker thread — Playwright's sync API
-        # binds its greenlet dispatcher to the creating thread, so passing a
-        # browser from the main thread causes "Cannot switch to a different thread".
-        _worker_browser = _launch_temp_browser() if _PLAYWRIGHT_OK else None
-        work_items: list[tuple[int, str, str, str]] = []
         try:
-            for idx, url in enumerate(urls, 1):
-                ts = datetime.now().strftime("%H:%M:%S")
-                if url in self.history and not force_redl:
-                    self._log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
-                    continue
-
-                self._log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
-                resolved = resolve_url(
-                    url, cookie_file=cookie_file, log=self._log,
-                    _browser=_worker_browser,
-                )
-
-                is_stream = resolved != url and (
-                    ".m3u8" in resolved or (".mp4" in resolved and "?" in resolved)
-                )
-                num_prefix = f"{idx:0{pad}d} - " if len(urls) > 1 else ""
-                if is_stream:
-                    slug = re.sub(r"[^\w\s-]", "", url.rstrip("/").split("/")[-1])
-                    slug = re.sub(r"\s+", "-", slug)[:80] or "video"
-                    tpl = f"{num_prefix}{slug}.%(ext)s"
-                else:
-                    tpl = f"{num_prefix}%(title).100B - [%(id)s].%(ext)s"
-
-                work_items.append((idx, url, resolved, tpl))
+            result = run_batch(
+                urls, policy, self._downloader,
+                history=self.history,
+                history_lock=self._history_lock,
+                history_path=HISTORY_F,
+                log=self._log,
+                set_status=lambda t: self.after(0, self.status_var.set, t),
+            )
+            if result.total == 0:
+                return
+            if result.failed == 0:
+                self._notify("Download complete",
+                             f"{result.succeeded} file{'s' if result.succeeded != 1 else ''} "
+                             f"saved to {policy.out_dir.name}")
+            else:
+                self._notify("Download finished with errors",
+                             f"{result.succeeded} succeeded, {result.failed} failed — check the log")
+        except Exception as exc:
+            self._log(f"Unexpected error: {exc}", "error")
         finally:
-            if _worker_browser:
-                try:
-                    _worker_browser.close()
-                except Exception:
-                    pass
-
-        if not work_items:
             self.downloading = False
             self.after(0, self._reset_btn)
-            return
-
-        total     = len(work_items)
-        workers   = min(MAX_WORKERS, total)
-        done      = [0]  # mutable for closure across threads
-        self._log(
-            f"\nStarting {total} download(s) with up to {workers} concurrent thread(s)…",
-            "info",
-        )
-        self.after(0, lambda: self.status_var.set(f"0 / {total} done"))
-
-        # ── Phase 2: Concurrent downloads ──────────────────────────────────
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    self._download_one,
-                    idx, url, resolved, tpl, out_dir, audio_only, fmt, sub_langs, cookie_file, browser_cookie,
-                ): (idx, url)
-                for idx, url, resolved, tpl in work_items
-            }
-            for future in as_completed(futures):
-                idx, url = futures[future]
-                try:
-                    ok = future.result()
-                except Exception as exc:
-                    self._log(f"  [#{idx}] Unexpected error: {exc}", "error")
-                    ok = False
-
-                if ok:
-                    with self._history_lock:
-                        self.history.add(url)
-                        save_history(HISTORY_F, self.history)
-                    done[0] += 1
-                    self.after(0, lambda d=done[0]: self.status_var.set(f"{d} / {total} done"))
-                else:
-                    self._log(f"  [#{idx}] Download failed.", "error")
-
-        self.downloading = False
-        failed = total - done[0]
-        if failed == 0:
-            self._notify("Download complete",
-                         f"{done[0]} file{'s' if done[0] != 1 else ''} saved to {out_dir.name}")
-        else:
-            self._notify("Download finished with errors",
-                         f"{done[0]} succeeded, {failed} failed — check the log")
-        self.after(0, self._reset_btn)
-
-    def _is_permanent_error(self, messages: list[str]) -> bool:
-        """Check if error messages indicate a permanent failure (not retryable)."""
-        combined = " ".join(messages).lower()
-        return any(kw in combined for kw in _PERMANENT_ERR_KEYWORDS)
-
-    def _download_one(
-        self,
-        idx: int,
-        url: str,
-        resolved: str,
-        tpl: str,
-        out_dir: Path,
-        audio_only: bool,
-        fmt: "str | None",
-        sub_langs: list[str],
-        cookie_file: "Path | None",
-        browser_cookie: "str | None" = None,
-    ) -> bool:
-        prefix = f"[#{idx}]"
-
-        def base_log(msg: str, tag: str = "info"):
-            self._log(f"{prefix} {msg}", tag)
-
-        def progress_hook(d: dict):
-            if d["status"] == "downloading":
-                pct   = d.get("_percent_str", "").strip()
-                speed = d.get("_speed_str", "?").strip()
-                eta   = d.get("_eta_str", "?").strip()
-                self.after(0, lambda p=pct, s=speed, e=eta:
-                    self.status_var.set(f"Downloading  {p}  •  {s}  •  ETA {e}"))
-            elif d["status"] == "finished":
-                self.after(0, lambda: self.status_var.set("Merging…"))
-
-        base_log(f"Starting: {url[:80]}", "accent")
-
-        # Retry loop with exponential backoff
-        for attempt in range(1, RETRY_MAX + 2):
-            captured_errors = []
-
-            def log(msg: str, tag: str = "info"):
-                base_log(msg, tag)
-                if tag == "error":
-                    captured_errors.append(msg)
-
-            ok = self._downloader.download(
-                resolved,
-                out_dir=out_dir,
-                audio_only=audio_only,
-                fmt=fmt,
-                write_metadata=False,
-                sub_langs=sub_langs,
-                cookie_file=cookie_file,
-                browser_cookie=browser_cookie,
-                out_template=tpl,
-                log=log,
-                progress_hook=progress_hook,
-                pre_resolved=True,
-            )
-
-            if ok:
-                return True
-
-            if self._is_permanent_error(captured_errors):
-                base_log("  Permanent error — not retrying", "error")
-                return False
-
-            if attempt <= RETRY_MAX:
-                delay = RETRY_DELAYS[attempt - 1]
-                base_log(f"  Attempt {attempt} failed — retrying in {delay}s…", "warn")
-                for i in range(delay, 0, -1):
-                    self.after(0, lambda s=i, a=attempt, idx_val=idx:
-                        self.status_var.set(f"Retry #{a} for #{idx_val} in {s}s…"))
-                    time.sleep(1)
-
-        base_log(f"  All {RETRY_MAX + 1} attempts failed.", "error")
-        return False
 
     def _notify(self, title: str, message: str):
         if not _NOTIFY_OK:
