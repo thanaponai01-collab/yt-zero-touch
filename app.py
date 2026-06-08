@@ -438,8 +438,21 @@ class App(tk.Tk):
                              f"{result.succeeded} file{'s' if result.succeeded != 1 else ''} "
                              f"saved to {policy.out_dir.name}")
             else:
+                # Surface what to do, not just that it failed. Show each distinct
+                # remedy once so the user can act without reading raw yt-dlp logs.
+                remedies = []
+                for _idx, _url, failure in result.failures:
+                    if failure and failure.remedy not in remedies:
+                        remedies.append(failure.remedy)
+                if remedies:
+                    self._log("How to fix the failures:", "accent")
+                    for remedy in remedies:
+                        self._log(f"  → {remedy}", "warn")
+                # Notification headline names the top cause when we know it.
+                top = next((f for _i, _u, f in result.failures if f), None)
+                detail = f" — {top.label}" if top else " — check the log"
                 self._notify("Download finished with errors",
-                             f"{result.succeeded} succeeded, {result.failed} failed — check the log")
+                             f"{result.succeeded} succeeded, {result.failed} failed{detail}")
         except Exception as exc:
             self._log(f"Unexpected error: {exc}", "error")
         finally:

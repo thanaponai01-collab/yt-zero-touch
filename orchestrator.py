@@ -27,35 +27,77 @@ from resolver import resolve_url, _launch_temp_browser, _PLAYWRIGHT_OK, LogFn, _
 from ytdlp_skill import save_history
 
 # ---------------------------------------------------------------------------
-# Permanent-error classification
+# Failure classification — what went wrong, and what the user can do about it
 # ---------------------------------------------------------------------------
+#
+# A download failure isn't just retryable-or-not; it carries a *cause* the user
+# can usually act on (supply cookies, update yt-dlp, …). We classify the captured
+# yt-dlp error text into a typed FailureClass so every front-end can show the
+# remedy instead of throwing the diagnosis away with a bare boolean.
+#
+# Keywords are deliberately whole phrases — earlier versions used bare substrings
+# like "age"/"geo"/"403", which match inside common transient-error words
+# ("message" contains "age"), silently disabling the retry path.
 
-# Phrases in yt-dlp error output that indicate a permanent, non-retryable
-# failure. These are deliberately whole phrases — earlier versions used bare
-# substrings like "age"/"geo"/"403", which match inside common transient-error
-# words ("message" contains "age"), silently disabling the retry path.
-PERMANENT_ERR_KEYWORDS = [
-    "video unavailable",
-    "has been removed",
-    "private video",
-    "this video is not available",
-    "geo-restricted",
-    "geo restricted",
-    "age-restricted",
-    "age restricted",
-    "sign in to confirm",
-    "http error 404",
-    "http error 403",
-    "not found",
-    "no video formats",
-    "no formats found",
+
+@dataclass(frozen=True)
+class FailureClass:
+    reason: str       # short stable id, e.g. "needs_cookies"
+    label: str        # human-readable headline
+    remedy: str       # one-line, actionable next step
+    permanent: bool   # True → don't retry (cause won't change on its own)
+
+
+# Ordered rules — first matching keyword wins, so more specific causes
+# (login, geo) are listed before the catch-all "removed".
+_FAILURE_RULES: "list[tuple[FailureClass, list[str]]]" = [
+    (FailureClass(
+        "needs_cookies", "Login required",
+        "Supply a cookies.txt or pick your browser in the cookie dropdown, then retry.",
+        permanent=True),
+     ["sign in to confirm", "private video", "http error 403", "http error 401",
+      "age-restricted", "age restricted", "login required", "members-only",
+      "join this channel", "this video is only available"]),
+
+    (FailureClass(
+        "geo_blocked", "Geo-restricted",
+        "Use cookies from a region where it's available, or a VPN, then retry.",
+        permanent=True),
+     ["geo-restricted", "geo restricted", "not available in your country",
+      "this video is not available"]),
+
+    (FailureClass(
+        "needs_update", "yt-dlp may be out of date",
+        "Click 'Update yt-dlp' in the app, then retry.",
+        permanent=True),
+     ["no video formats", "no formats found", "unable to extract",
+      "unsupported url"]),
+
+    (FailureClass(
+        "removed", "Video removed or unavailable",
+        "The video was deleted or made private at the source — nothing to do.",
+        permanent=True),
+     ["video unavailable", "has been removed", "http error 404", "not found"]),
 ]
 
 
-def is_permanent_error(messages: list[str], keywords=PERMANENT_ERR_KEYWORDS) -> bool:
-    """True if any captured error message names a permanent (non-retryable) failure."""
+def classify_failure(messages: list[str]) -> "FailureClass | None":
+    """Classify captured error messages into a typed cause.
+
+    Returns the matching FailureClass, or None when nothing matches — an
+    unclassified failure is treated as transient (retryable).
+    """
     combined = " ".join(messages).lower()
-    return any(kw in combined for kw in keywords)
+    for failure, keywords in _FAILURE_RULES:
+        if any(kw in combined for kw in keywords):
+            return failure
+    return None
+
+
+def is_permanent_error(messages: list[str]) -> bool:
+    """True if the captured error names a permanent (non-retryable) failure."""
+    failure = classify_failure(messages)
+    return failure is not None and failure.permanent
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +151,21 @@ class BatchResult:
     total: int = 0
     succeeded: int = 0
     failed: int = 0
+    # (idx, url, FailureClass | None) for each failed item — lets the caller
+    # show the user what to do, not just a count.
+    failures: list = field(default_factory=list)
+
+
+@dataclass
+class DownloadOutcome:
+    """Result of one (retried) download: success plus the classified cause on
+    failure. Truthy iff ``ok`` so existing ``if download_with_retry(...)``
+    callers keep working unchanged."""
+    ok: bool
+    failure: "FailureClass | None" = None
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +181,13 @@ def download_with_retry(
     log: LogFn = _print_log,
     set_status: "Callable[[str], None]" = lambda *_: None,
     sleep: "Callable[[float], None]" = time.sleep,
-) -> bool:
+) -> DownloadOutcome:
     """Run download_fn, retrying transient failures with backoff.
 
     download_fn receives (log, progress_hook) and returns True on success. Error
     messages logged with tag "error" are captured and classified; a permanent
-    failure short-circuits the retry loop.
+    failure short-circuits the retry loop. Returns a DownloadOutcome carrying
+    the classified cause on failure (and truthy iff it succeeded).
     """
     prefix = f"[#{idx}] " if idx is not None else ""
 
@@ -147,6 +205,7 @@ def download_with_retry(
 
     base_log(f"Starting: {url[:80]}", "accent")
 
+    last_errors: list[str] = []
     for attempt in range(1, policy.retry_max + 2):
         captured_errors: list[str] = []
 
@@ -156,11 +215,13 @@ def download_with_retry(
                 captured_errors.append(msg)
 
         if download_fn(log_capture, progress_hook):
-            return True
+            return DownloadOutcome(ok=True)
 
-        if is_permanent_error(captured_errors):
-            base_log("  Permanent error — not retrying", "error")
-            return False
+        last_errors = captured_errors
+        failure = classify_failure(captured_errors)
+        if failure and failure.permanent:
+            base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
+            return DownloadOutcome(ok=False, failure=failure)
 
         if attempt <= policy.retry_max:
             delay = policy.retry_delays[attempt - 1]
@@ -171,7 +232,7 @@ def download_with_retry(
                 sleep(1)
 
     base_log(f"  All {policy.retry_max + 1} attempts failed.", "error")
-    return False
+    return DownloadOutcome(ok=False, failure=classify_failure(last_errors))
 
 
 # ---------------------------------------------------------------------------
@@ -270,19 +331,23 @@ def run_batch(
         for future in as_completed(futures):
             idx, url = futures[future]
             try:
-                ok = future.result()
+                outcome = future.result()
             except Exception as exc:
                 log(f"  [#{idx}] Unexpected error: {exc}", "error")
-                ok = False
+                outcome = DownloadOutcome(ok=False)
 
-            if ok:
+            if outcome.ok:
                 with history_lock:
                     history.add(url)
                     save_history(history_path, history)
                 done[0] += 1
                 set_status(f"{done[0]} / {total} done")
             else:
-                log(f"  [#{idx}] Download failed.", "error")
+                if outcome.failure:
+                    log(f"  [#{idx}] {outcome.failure.label}: {outcome.failure.remedy}", "warn")
+                else:
+                    log(f"  [#{idx}] Download failed.", "error")
+                result.failures.append((idx, url, outcome.failure))
 
     result.succeeded = done[0]
     result.failed = total - done[0]

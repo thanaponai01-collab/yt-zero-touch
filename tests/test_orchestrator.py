@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator import (  # noqa: E402
     is_permanent_error,
+    classify_failure,
+    download_with_retry,
     build_output_template,
     run_batch,
     BatchPolicy,
@@ -41,6 +43,73 @@ class TestIsPermanentError(unittest.TestCase):
         # classified permanent and never retried.
         self.assertFalse(is_permanent_error(["received message too short, will retry"]))
         self.assertFalse(is_permanent_error(["unexpected end of stream package"]))
+
+
+class TestClassifyFailure(unittest.TestCase):
+    def test_login_required_maps_to_cookies(self):
+        for msg in ["ERROR: Sign in to confirm your age",
+                    "Private video. Sign in if you've been granted access",
+                    "HTTP Error 403: Forbidden"]:
+            fc = classify_failure([msg])
+            self.assertIsNotNone(fc, msg)
+            self.assertEqual(fc.reason, "needs_cookies", msg)
+            self.assertTrue(fc.permanent)
+            self.assertIn("cookie", fc.remedy.lower())
+
+    def test_geo_block_maps_to_geo(self):
+        fc = classify_failure(["This video is not available in your country"])
+        self.assertEqual(fc.reason, "geo_blocked")
+
+    def test_no_formats_suggests_update(self):
+        fc = classify_failure(["ERROR: No video formats found"])
+        self.assertEqual(fc.reason, "needs_update")
+
+    def test_removed_video(self):
+        fc = classify_failure(["ERROR: Video unavailable. This video has been removed"])
+        self.assertEqual(fc.reason, "removed")
+
+    def test_transient_is_unclassified(self):
+        self.assertIsNone(classify_failure(["Connection reset by peer, retrying"]))
+        self.assertIsNone(classify_failure([]))
+
+
+class TestDownloadWithRetry(unittest.TestCase):
+    def _policy(self, **kw):
+        return BatchPolicy(out_dir=Path("."), retry_delays=(0, 0, 0), **kw)
+
+    def test_success_returns_truthy_outcome(self):
+        outcome = download_with_retry(
+            lambda log, hook: True, policy=self._policy(), url="x", sleep=lambda *_: None,
+        )
+        self.assertTrue(outcome.ok)
+        self.assertTrue(outcome)          # __bool__ keeps old callers working
+        self.assertIsNone(outcome.failure)
+
+    def test_permanent_failure_does_not_retry_and_carries_reason(self):
+        calls = []
+        def dl(log, hook):
+            calls.append(1)
+            log("ERROR: Private video", "error")
+            return False
+        outcome = download_with_retry(
+            dl, policy=self._policy(retry_max=3), url="x", sleep=lambda *_: None,
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(len(calls), 1)   # short-circuited, no retries
+        self.assertEqual(outcome.failure.reason, "needs_cookies")
+
+    def test_transient_failure_retries_then_gives_up_unclassified(self):
+        calls = []
+        def dl(log, hook):
+            calls.append(1)
+            log("ERROR: connection reset by peer", "error")
+            return False
+        outcome = download_with_retry(
+            dl, policy=self._policy(retry_max=2), url="x", sleep=lambda *_: None,
+        )
+        self.assertFalse(outcome.ok)
+        self.assertEqual(len(calls), 3)   # initial + 2 retries
+        self.assertIsNone(outcome.failure)
 
 
 class TestBuildOutputTemplate(unittest.TestCase):

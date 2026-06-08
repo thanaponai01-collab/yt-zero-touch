@@ -167,10 +167,11 @@ def watch(
                         future = in_flight.pop(url)
                         ts = datetime.now().strftime("%H:%M:%S")
                         try:
-                            ok = future.result()
+                            outcome = future.result()
                         except Exception as exc:
                             print(f"[{ts}] Worker exception for {url}: {exc}")
-                            ok = False
+                            outcome = None
+                        ok = bool(outcome)
 
                         # Partial-file guard: if .part files remain, treat as failed
                         if ok and has_partial_files(out_dir):
@@ -185,7 +186,11 @@ def watch(
                             print(f"[{ts}] Done: {url}")
                         else:
                             stats["failed"] += 1
-                            print(f"[{ts}] Failed — will retry next time: {url}")
+                            failure = getattr(outcome, "failure", None)
+                            if failure:
+                                print(f"[{ts}] Failed ({failure.label}) — {failure.remedy}: {url}")
+                            else:
+                                print(f"[{ts}] Failed — will retry next time: {url}")
 
                     # ── 2. Check for file changes ─────────────────────────
                     try:
