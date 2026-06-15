@@ -33,7 +33,7 @@ from ytdlp_skill import (
     check_disk_space, has_partial_files, check_dependencies,
     _KNOWN_DOMAINS, _print_log,
 )
-from orchestrator import download_with_retry, BatchPolicy
+from orchestrator import download_with_retry, BatchPolicy, DownloadOutcome
 
 # ---------------------------------------------------------------------------
 # URL detection
@@ -82,8 +82,9 @@ def _download_worker(
     audio_only: bool,
     playlist: bool,
     sub_langs: list[str],
-) -> bool:
-    """Run in a thread — returns True on success.
+) -> DownloadOutcome:
+    """Run in a thread — returns a DownloadOutcome (truthy on success, carrying
+    the classified failure cause otherwise).
 
     Shares the orchestrator's retry + permanent-error classification with the
     GUI so a fix to one reaches both.

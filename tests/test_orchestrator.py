@@ -44,8 +44,33 @@ class TestIsPermanentError(unittest.TestCase):
         self.assertFalse(is_permanent_error(["received message too short, will retry"]))
         self.assertFalse(is_permanent_error(["unexpected end of stream package"]))
 
+    def test_bare_http_codes_are_permanent(self):
+        # A bare code with no "HTTP Error " prefix must still classify as
+        # permanent (403/401 → needs login, 404 → removed).
+        self.assertTrue(is_permanent_error(["ERROR: server returned 403"]))
+        self.assertTrue(is_permanent_error(["ERROR: got 404 for fragment 1"]))
+        self.assertTrue(is_permanent_error(["ERROR: unauthorized (401)"]))
+
+    def test_lookalike_numbers_do_not_trip_bare_code_match(self):
+        # Word-boundary match — "4040" / "503" / a number glued to text must not
+        # be read as a 403/404/401.
+        self.assertFalse(is_permanent_error(["downloaded 4040 bytes, retrying"]))
+        self.assertFalse(is_permanent_error(["HTTP Error 503: Service Unavailable… retrying"]))
+        self.assertFalse(is_permanent_error(["timeout after 4030ms"]))
+
 
 class TestClassifyFailure(unittest.TestCase):
+    def test_bare_403_maps_to_cookies_404_to_removed(self):
+        self.assertEqual(classify_failure(["got 403 back"]).reason, "needs_cookies")
+        self.assertEqual(classify_failure(["got 404 back"]).reason, "removed")
+
+    def test_phrase_rule_wins_over_bare_code(self):
+        # A geo phrase next to a stray 403 still classifies as geo, because the
+        # phrase rules run before the bare-code fallback.
+        fc = classify_failure(["not available in your country (was 403 earlier)"])
+        self.assertEqual(fc.reason, "geo_blocked")
+
+
     def test_login_required_maps_to_cookies(self):
         for msg in ["ERROR: Sign in to confirm your age",
                     "Private video. Sign in if you've been granted access",
@@ -187,6 +212,32 @@ class TestRunBatch(unittest.TestCase):
         result = self._run(["http://a/1"], history, dl, force=True)
         self.assertEqual(result.total, 1)
         self.assertTrue(dl.calls[0][1]["force"])     # force propagated to downloader
+
+    def test_permanent_failure_classified_recorded_and_not_in_history(self):
+        # Seam coverage: run_batch → real download_with_retry → real
+        # classify_failure → BatchResult.failures, mocking only the leaf
+        # downloader. A permanent failure must not retry, must stay out of
+        # history, and must carry an actionable cause to the caller.
+        class _FailingDownloader:
+            def __init__(self):
+                self.calls = 0
+
+            def download(self, resolved, **kwargs):
+                self.calls += 1
+                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                return False
+
+        history = set()
+        dl = _FailingDownloader()
+        result = self._run(["http://a/1"], history, dl)
+        self.assertEqual(result.total, 1)
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(dl.calls, 1)                # permanent → no retries
+        self.assertNotIn("http://a/1", history)      # failures never recorded
+        self.assertEqual(len(result.failures), 1)
+        _idx, _url, failure = result.failures[0]
+        self.assertEqual(failure.reason, "needs_cookies")
 
 
 if __name__ == "__main__":

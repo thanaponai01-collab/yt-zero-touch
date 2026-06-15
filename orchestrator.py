@@ -36,8 +36,8 @@ from ytdlp_skill import save_history
 # remedy instead of throwing the diagnosis away with a bare boolean.
 #
 # Keywords are deliberately whole phrases — earlier versions used bare substrings
-# like "age"/"geo"/"403", which match inside common transient-error words
-# ("message" contains "age"), silently disabling the retry path.
+# like "age"/"geo", which match inside common transient-error words ("message"
+# contains "age"), silently disabling the retry path.
 
 
 @dataclass(frozen=True)
@@ -48,37 +48,51 @@ class FailureClass:
     permanent: bool   # True → don't retry (cause won't change on its own)
 
 
+# Named so the bare-HTTP-code fallback below can reuse the same instances.
+_LOGIN = FailureClass(
+    "needs_cookies", "Login required",
+    "Supply a cookies.txt or pick your browser in the cookie dropdown, then retry.",
+    permanent=True)
+_GEO = FailureClass(
+    "geo_blocked", "Geo-restricted",
+    "Use cookies from a region where it's available, or a VPN, then retry.",
+    permanent=True)
+_UPDATE = FailureClass(
+    "needs_update", "yt-dlp may be out of date",
+    "Click 'Update yt-dlp' in the app, then retry.",
+    permanent=True)
+_REMOVED = FailureClass(
+    "removed", "Video removed or unavailable",
+    "The video was deleted or made private at the source — nothing to do.",
+    permanent=True)
+
+
 # Ordered rules — first matching keyword wins, so more specific causes
 # (login, geo) are listed before the catch-all "removed".
 _FAILURE_RULES: "list[tuple[FailureClass, list[str]]]" = [
-    (FailureClass(
-        "needs_cookies", "Login required",
-        "Supply a cookies.txt or pick your browser in the cookie dropdown, then retry.",
-        permanent=True),
+    (_LOGIN,
      ["sign in to confirm", "private video", "http error 403", "http error 401",
       "age-restricted", "age restricted", "login required", "members-only",
       "join this channel", "this video is only available"]),
 
-    (FailureClass(
-        "geo_blocked", "Geo-restricted",
-        "Use cookies from a region where it's available, or a VPN, then retry.",
-        permanent=True),
+    (_GEO,
      ["geo-restricted", "geo restricted", "not available in your country",
       "this video is not available"]),
 
-    (FailureClass(
-        "needs_update", "yt-dlp may be out of date",
-        "Click 'Update yt-dlp' in the app, then retry.",
-        permanent=True),
+    (_UPDATE,
      ["no video formats", "no formats found", "unable to extract",
       "unsupported url"]),
 
-    (FailureClass(
-        "removed", "Video removed or unavailable",
-        "The video was deleted or made private at the source — nothing to do.",
-        permanent=True),
+    (_REMOVED,
      ["video unavailable", "has been removed", "http error 404", "not found"]),
 ]
+
+# Bare HTTP status codes (when an extractor prints just "403" with no
+# "HTTP Error " prefix). Matched with word boundaries — naive substrings would
+# trip on lookalikes like "4040 bytes" or a video id — and only as a fallback,
+# after the phrase rules above, so e.g. a geo phrase still wins over a stray 403.
+_HTTP_CODE_CAUSE = {"401": _LOGIN, "403": _LOGIN, "404": _REMOVED}
+_HTTP_CODE_RE = re.compile(r"\b(401|403|404)\b")
 
 
 def classify_failure(messages: list[str]) -> "FailureClass | None":
@@ -91,6 +105,9 @@ def classify_failure(messages: list[str]) -> "FailureClass | None":
     for failure, keywords in _FAILURE_RULES:
         if any(kw in combined for kw in keywords):
             return failure
+    m = _HTTP_CODE_RE.search(combined)
+    if m:
+        return _HTTP_CODE_CAUSE[m.group(1)]
     return None
 
 
