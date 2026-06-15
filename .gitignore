@@ -9,6 +9,7 @@ downloads/
 # Runtime data (not source code)
 processed_urls.json
 cookies.txt
+.last_update_check
 
 # Temp/UUID files
 *.txt

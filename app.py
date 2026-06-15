@@ -13,7 +13,7 @@ import subprocess
 import re
 from pathlib import Path
 
-from ytdlp_skill import load_history, Downloader, QUALITY_PRESETS
+from ytdlp_skill import load_history, Downloader, QUALITY_PRESETS, update_tools
 from orchestrator import run_batch, BatchPolicy
 
 try:
@@ -93,6 +93,8 @@ class App(tk.Tk):
                 "warn",
             )
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Keep extractors fresh (throttled to once per week, runs in background).
+        self._maybe_auto_update()
 
     def _check_ffmpeg(self) -> bool:
         try:
@@ -231,7 +233,7 @@ class App(tk.Tk):
         q_frame.grid(row=0, column=0, sticky="w", padx=(0, 12))
         tk.Label(q_frame, text="Quality:", bg=COLORS["panel"],
                  fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
-        _quality_values = list(QUALITY_PRESETS.keys()) + ["Audio only"]
+        _quality_values = list(QUALITY_PRESETS.keys()) + ["Audio only", "Photos"]
         q_menu = tk.OptionMenu(q_frame, self.quality, *_quality_values)
         q_menu.config(bg=COLORS["accent2"], fg=COLORS["text"],
                       activebackground=COLORS["accent"], activeforeground="white",
@@ -258,7 +260,7 @@ class App(tk.Tk):
         self.open_btn = self._small_btn(opts, "Open folder", self._open_folder)
         self.open_btn.grid(row=0, column=6, sticky="e", padx=(0, 10))
 
-        self._small_btn(opts, "Update yt-dlp", self._update_ytdlp).grid(
+        self._small_btn(opts, "Update tools", self._update_ytdlp).grid(
             row=0, column=5, sticky="e", padx=(0, 6))
 
         # ── Log ─────────────────────────────────────────────────────────
@@ -330,57 +332,59 @@ class App(tk.Tk):
         Path(path).mkdir(parents=True, exist_ok=True)
         os.startfile(path)
 
-    def _update_ytdlp(self):
+    def _update_ytdlp(self, *, quiet: bool = False):
+        """Update yt-dlp (nightly) + gallery-dl in a background thread.
+
+        quiet=True is used by the throttled startup auto-update so a "nothing
+        changed" run doesn't spam the log on every launch.
+        """
         if self._updating:
-            self._log("Update already in progress…", "warn")
+            if not quiet:
+                self._log("Update already in progress…", "warn")
             return
-        import subprocess, threading, sys
-        self._log("Updating yt-dlp (nightly channel)…", "info")
-        NIGHTLY = ("yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds"
-                   "/releases/latest/download/yt-dlp.tar.gz")
-        def _version():
-            try:
-                r = subprocess.run(
-                    [sys.executable, "-m", "pip", "show", "yt-dlp"],
-                    capture_output=True, text=True, timeout=15,
-                )
-                for ln in r.stdout.splitlines():
-                    if ln.lower().startswith("version:"):
-                        return ln.split(":", 1)[1].strip()
-            except Exception:
-                pass
-            return "unknown"
+        import threading
+
         def _run():
             self._updating = True
-            before = _version()
-            self.after(0, self._log, f"Before: yt-dlp {before}", "muted")
             try:
-                result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-U", "--force-reinstall",
-                     "--no-deps", NIGHTLY],
-                    capture_output=True, text=True, timeout=180,
-                )
-                if result.returncode != 0:
-                    out = (result.stdout + result.stderr).strip()
-                    if "WinError 32" in out or "being used by another process" in out:
-                        self.after(0, self._log,
-                            "Update failed: yt-dlp files are locked. "
-                            "Close the app, run the update from a terminal, then reopen.", "error")
-                    else:
-                        for line in out.splitlines()[-15:]:
-                            self.after(0, self._log, line, "error")
-                    return
-                after = _version()
-                if after != before:
-                    self.after(0, self._log, f"Updated: {before} → {after}", "success")
-                    self.after(0, self._log, "Restart the app to use the new version.", "warn")
-                else:
-                    self.after(0, self._log, f"Already at latest nightly ({after}).", "success")
+                changed = update_tools(log=self._log if not quiet else (lambda *a, **k: None))
+                if changed:
+                    self._log("Tools updated — restart the app to use the new version.", "warn")
+                elif not quiet:
+                    self._log("Tools already up to date.", "success")
             except Exception as exc:
-                self.after(0, self._log, f"Update failed: {exc}", "error")
+                if not quiet:
+                    self._log(f"Update failed: {exc}", "error")
             finally:
                 self._updating = False
+                self._stamp_update_check()
         threading.Thread(target=_run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Throttled startup auto-update — keeps extractors fresh without nagging
+    # ------------------------------------------------------------------
+
+    _UPDATE_STAMP = BASE_DIR / ".last_update_check"
+    _UPDATE_INTERVAL_DAYS = 7
+
+    def _stamp_update_check(self):
+        import time
+        try:
+            self._UPDATE_STAMP.write_text(str(int(time.time())))
+        except Exception:
+            pass
+
+    def _maybe_auto_update(self):
+        """Run a quiet update at most once per _UPDATE_INTERVAL_DAYS."""
+        import time
+        try:
+            last = float(self._UPDATE_STAMP.read_text().strip())
+        except Exception:
+            last = 0.0
+        if time.time() - last < self._UPDATE_INTERVAL_DAYS * 86400:
+            return
+        self._log("Checking for yt-dlp / gallery-dl updates in the background…", "muted")
+        self._update_ytdlp(quiet=True)
 
     def _start_download(self):
         if self.downloading:
@@ -406,13 +410,15 @@ class App(tk.Tk):
     def _download_worker(self, urls: list[str]):
         quality    = self.quality.get()
         audio_only = (quality == "Audio only")
+        gallery    = (quality == "Photos")
         ck_path_str    = self.cookie_file.get().strip()
         browser_cookie = self.browser_cookies.get()
 
         policy = BatchPolicy(
             out_dir=Path(self.out_dir.get()),
             audio_only=audio_only,
-            fmt=None if audio_only else QUALITY_PRESETS.get(quality),
+            gallery=gallery,
+            fmt=None if (audio_only or gallery) else QUALITY_PRESETS.get(quality),
             sub_langs=[lang for lang, var in (("en", self.sub_en), ("th", self.sub_th))
                        if var.get()],
             cookie_file=Path(ck_path_str) if ck_path_str else None,

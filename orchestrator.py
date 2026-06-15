@@ -151,6 +151,7 @@ def build_output_template(idx: int, url: str, resolved: str, total: int, pad: in
 class BatchPolicy:
     out_dir: Path
     audio_only: bool = False
+    gallery: bool = False          # Photos mode — route every URL to gallery-dl
     fmt: "str | None" = None
     sub_langs: list = field(default_factory=list)
     cookie_file: "Path | None" = None
@@ -263,6 +264,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
             resolved,
             out_dir=policy.out_dir,
             audio_only=policy.audio_only,
+            gallery=policy.gallery,
             playlist=policy.playlist,
             write_metadata=policy.write_metadata,
             fmt=policy.fmt,
@@ -304,7 +306,11 @@ def run_batch(
     pad = len(str(len(urls)))
 
     # ── Phase 1: resolve sequentially with a warm browser ──────────────────
-    worker_browser = browser_factory() if playwright_ok else None
+    # Photos mode hands the raw URL to gallery-dl, which does its own resolution,
+    # so we skip stream interception (and the browser) entirely for it.
+    worker_browser = (
+        browser_factory() if (playwright_ok and not policy.gallery) else None
+    )
     work_items: list[tuple[int, str, str, str]] = []
     try:
         for idx, url in enumerate(urls, 1):
@@ -312,11 +318,14 @@ def run_batch(
             if url in history and not policy.force:
                 log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
                 continue
-            log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
-            resolved = resolve_fn(
-                url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
-            )
-            tpl = build_output_template(idx, url, resolved, len(urls), pad)
+            if policy.gallery:
+                resolved, tpl = url, ""        # gallery-dl ignores the template
+            else:
+                log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
+                resolved = resolve_fn(
+                    url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
+                )
+                tpl = build_output_template(idx, url, resolved, len(urls), pad)
             work_items.append((idx, url, resolved, tpl))
     finally:
         if worker_browser:

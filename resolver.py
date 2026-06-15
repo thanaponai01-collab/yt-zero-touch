@@ -70,6 +70,29 @@ _KNOWN_DOMAINS = [
 _IGNORE_STREAM = ["doubleclick", "googlevideo.com", "googlesyndication",
                   "thumbnail", "preview", "poster", "image"]
 
+# Response bodies worth scanning for a stream URL embedded in the payload
+# (many players fetch a small JSON/manifest that *contains* the real .m3u8).
+_SCANNABLE_CTYPES = ("mpegurl", "dash+xml", "json", "text/", "javascript")
+_MAX_SCAN_BYTES = 3_000_000
+
+# Best-effort selectors to dismiss consent walls and start lazy-loaded players,
+# so the player actually requests its stream within our wait window.
+_CONSENT_SELECTORS = (
+    "button#onetrust-accept-btn-handler",
+    "button[aria-label*='accept' i]",
+    "button:has-text('Accept')",
+    "button:has-text('I agree')",
+    "button:has-text('Agree')",
+    "button:has-text('Got it')",
+)
+_PLAY_SELECTORS = (
+    "button[aria-label*='play' i]",
+    ".vjs-big-play-button",
+    ".ytp-large-play-button",
+    "button.play",
+    "[class*='play-button']",
+)
+
 
 # ---------------------------------------------------------------------------
 # URL resolution
@@ -174,6 +197,28 @@ def _launch_temp_browser() -> "_TempBrowser":
     return _TempBrowser()
 
 
+def _nudge_player(page) -> None:
+    """Best-effort: dismiss consent dialogs, scroll, and click a play button so
+    a lazy-loaded player issues its stream request. All steps are optional and
+    never raise — a site that needs none of them is unaffected."""
+    for sel in _CONSENT_SELECTORS:
+        try:
+            page.click(sel, timeout=800)
+            break
+        except Exception:
+            pass
+    try:
+        page.mouse.wheel(0, 1200)
+    except Exception:
+        pass
+    for sel in _PLAY_SELECTORS:
+        try:
+            page.click(sel, timeout=800)
+            break
+        except Exception:
+            pass
+
+
 def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "str | None":
     log("Launching headless browser to intercept stream…", "muted")
     captured = []
@@ -198,17 +243,44 @@ def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "st
         if _STREAM_RE.search(u) and not any(x in u for x in _IGNORE_STREAM):
             captured.append(u)
 
+    def _on_response(resp):
+        # Scan small text/JSON/manifest bodies for a stream URL the page never
+        # requested directly (e.g. an API that returns the .m3u8 in its JSON).
+        try:
+            ctype = (resp.headers or {}).get("content-type", "").lower()
+            if not any(t in ctype for t in _SCANNABLE_CTYPES):
+                return
+            body = resp.text()
+        except Exception:
+            return
+        if not body or len(body) > _MAX_SCAN_BYTES:
+            return
+        for m in _STREAM_RE.findall(body):
+            if not any(x in m for x in _IGNORE_STREAM):
+                captured.append(m)
+
     page.on("request", _on_request)
+    page.on("response", _on_response)
 
     try:
         page.goto(url, wait_until="load", timeout=30_000)
     except Exception:
         pass
 
-    elapsed, limit, step = 0, 15_000, 500
+    # Nudge the page into actually loading its player: dismiss consent walls,
+    # scroll lazy content into view, and click an obvious play button.
+    _nudge_player(page)
+
+    elapsed, limit, step = 0, 20_000, 500
     while not captured and elapsed < limit:
         page.wait_for_timeout(step)
         elapsed += step
+        # Re-scroll periodically — some players only initialise once visible.
+        if elapsed % 5_000 == 0:
+            try:
+                page.mouse.wheel(0, 1500)
+            except Exception:
+                pass
 
     page.close()
     ctx.close()

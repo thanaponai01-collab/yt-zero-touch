@@ -82,6 +82,7 @@ def _download_worker(
     audio_only: bool,
     playlist: bool,
     sub_langs: list[str],
+    gallery: bool = False,
 ) -> DownloadOutcome:
     """Run in a thread — returns a DownloadOutcome (truthy on success, carrying
     the classified failure cause otherwise).
@@ -96,6 +97,7 @@ def _download_worker(
             url,
             out_dir=out_dir,
             audio_only=audio_only,
+            gallery=gallery,
             playlist=playlist,
             write_metadata=True,
             sub_langs=sub_langs,
@@ -115,6 +117,7 @@ def watch(
     max_workers: int = 3,
     playlist: bool = False,
     sub_langs: list[str] | None = None,
+    gallery: bool = False,
 ):
     sub_langs = sub_langs or []
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -146,7 +149,9 @@ def watch(
 """)
     print(f"  URL file    : {url_file.resolve()}")
     print(f"  Output      : {out_dir.resolve()}")
-    print(f"  Mode        : {'Audio only' if audio_only else 'H.264 video + audio'}")
+    _mode = "Photos (gallery-dl)" if gallery else (
+        "Audio only" if audio_only else "H.264 video + audio")
+    print(f"  Mode        : {_mode}")
     print(f"  Playlist    : {'yes' if playlist else 'no (single video)'}")
     print(f"  Subtitles   : {', '.join(sub_langs) if sub_langs else 'none'}")
     print(f"  Concurrency : {max_workers} worker(s)")
@@ -229,7 +234,8 @@ def watch(
                                 continue
 
                             future = executor.submit(
-                                _download_worker, dl, url, out_dir, audio_only, playlist, sub_langs
+                                _download_worker, dl, url, out_dir, audio_only,
+                                playlist, sub_langs, gallery,
                             )
                             in_flight[url] = future
 
@@ -289,6 +295,12 @@ def main():
         help="Download full playlists instead of single videos",
     )
     parser.add_argument(
+        "--photos",
+        action="store_true",
+        help="Photos mode: download images/carousels with gallery-dl "
+             "(Instagram, Twitter/X, Reddit, …) instead of video",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Detect URLs and log them, but don't download",
@@ -321,6 +333,7 @@ def main():
         max_workers=args.max_workers,
         playlist=args.playlist,
         sub_langs=sub_langs,
+        gallery=args.photos,
     )
 
 

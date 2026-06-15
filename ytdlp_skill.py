@@ -59,6 +59,12 @@ try:
 except ImportError:
     _GDOWN_OK = False
 
+try:
+    import gallery_dl as _gallery_dl  # noqa: F401  (presence check only)
+    _GALLERY_DL_OK = True
+except ImportError:
+    _GALLERY_DL_OK = False
+
 # ---------------------------------------------------------------------------
 # Public constants — override before calling download() if needed
 # ---------------------------------------------------------------------------
@@ -123,6 +129,22 @@ _GDRIVE_RE = re.compile(
     r'drive\.google\.com/(?:file/d/|open\?.*?id=|uc\?.*?id=)([a-zA-Z0-9_-]+)'
 )
 
+# Hosts where photos / carousels / image galleries are the point — gallery-dl
+# is the right tool here (yt-dlp is video-only and will fail on a photo post).
+# A URL on one of these hosts is routed to gallery-dl when the user picks
+# "Photos" mode, and is used as a fallback target when yt-dlp finds no video.
+IMAGE_HOSTS = (
+    "instagram.com", "twitter.com", "x.com", "reddit.com", "redd.it",
+    "pinterest.com", "pin.it", "flickr.com", "imgur.com", "tumblr.com",
+    "deviantart.com", "artstation.com", "weibo.com", "pixiv.net",
+    "facebook.com", "fbcdn.net", "threads.net",
+)
+
+
+def is_image_host(url: str) -> bool:
+    """True if the URL is on a host where gallery-dl handles photos/galleries."""
+    return any(h in url for h in IMAGE_HOSTS)
+
 
 # ---------------------------------------------------------------------------
 # Core download functions
@@ -164,11 +186,73 @@ def _download_gdrive(file_id: str, out_dir: Path, log: LogFn) -> bool:
         return False
 
 
+def _download_gallery(
+    url: str,
+    out_dir: Path,
+    cookie_file: "Path | None",
+    browser_cookie: "str | None",
+    force: bool,
+    log: LogFn,
+) -> bool:
+    """Download photos / image galleries with gallery-dl (Instagram, Twitter, …).
+
+    gallery-dl is the photo counterpart to yt-dlp: it handles single image posts,
+    multi-image carousels, and the videos inside those same posts. We shell out to
+    it (``python -m gallery_dl``) so a gallery-dl upgrade can't break our import,
+    and reuse the very same cookie options the video path uses.
+    """
+    if not _GALLERY_DL_OK:
+        log("gallery-dl not installed — run: pip install gallery-dl", "error")
+        return False
+
+    import subprocess
+    import sys
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "gallery_dl",
+        "--dest", str(out_dir),
+        # gallery-dl skips files it already has by default; --no-skip forces a
+        # re-download when the user ticks Re-download.
+        *(["--no-skip"] if force else []),
+    ]
+    if cookie_file and cookie_file.exists():
+        cmd += ["--cookies", str(cookie_file)]
+    elif browser_cookie:
+        cmd += ["--cookies-from-browser", browser_cookie]
+    cmd.append(url)
+
+    log("Downloading images with gallery-dl…", "info")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        log("  gallery-dl timed out after 600s", "error")
+        return False
+    except Exception as exc:
+        log(f"  gallery-dl error: {exc}", "error")
+        return False
+
+    for line in (proc.stdout or "").splitlines():
+        log(f"  {line}", "muted")
+    if proc.returncode != 0:
+        # gallery-dl prints the real cause to stderr — surface the tail as
+        # "error" so the orchestrator's classifier/retry sees it.
+        tail = (proc.stderr or "").strip().splitlines()[-5:]
+        for line in tail:
+            log(f"  {line}", "error")
+        if not tail:
+            log(f"  gallery-dl exited with code {proc.returncode}", "error")
+        return False
+    log("  gallery-dl finished.", "success")
+    return True
+
+
 def download(
     url: str,
     out_dir: "Path | str" = "./downloads",
     *,
     audio_only: bool = False,
+    gallery: bool = False,
     playlist: bool = False,
     write_metadata: bool = True,
     sub_langs: "list[str] | None" = None,
@@ -188,6 +272,9 @@ def download(
         url:            Video/playlist page URL or direct stream URL.
         out_dir:        Destination folder. Created if absent.
         audio_only:     Extract audio only (opus).
+        gallery:        Force the gallery-dl photo path (Instagram/Twitter/… images).
+                        When False, image-host URLs still fall back to gallery-dl
+                        automatically if yt-dlp finds no video.
         playlist:       Download all items in a playlist (default: single video only).
         write_metadata: Write a .info.json sidecar next to each file.
         sub_langs:      Subtitle language codes, e.g. ["en", "th"].
@@ -218,6 +305,10 @@ def download(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Photos mode: gallery-dl owns the whole download (no yt-dlp, no resolve).
+    if gallery:
+        return _download_gallery(url, out_dir, cookie_file, browser_cookie, force, log)
+
     # Google Drive: use gdown (handles large files + virus-scan bypass)
     gdrive_id = _gdrive_file_id(url)
     if gdrive_id:
@@ -237,10 +328,16 @@ def download(
     if not _YT_DLP_API_OK:
         log("yt-dlp is not installed — run: pip install yt-dlp", "error")
         return False
-    return _download_api(
+    ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, cookie_file, browser_cookie, force, log, progress_hook,
     )
+    # Auto-fallback: an Instagram/Twitter/… link that yt-dlp can't handle is
+    # usually a photo or carousel — let gallery-dl take a turn before giving up.
+    if not ok and not audio_only and _GALLERY_DL_OK and is_image_host(url):
+        log("yt-dlp found no video — trying gallery-dl for images…", "info")
+        return _download_gallery(url, out_dir, cookie_file, browser_cookie, force, log)
+    return ok
 
 
 def _download_api(
@@ -410,6 +507,7 @@ class Downloader:
         out_dir: "Path | str" = "./downloads",
         *,
         audio_only: bool = False,
+        gallery: bool = False,
         playlist: bool = False,
         write_metadata: bool = True,
         sub_langs: "list[str] | None" = None,
@@ -430,6 +528,7 @@ class Downloader:
             url,
             out_dir=out_dir,
             audio_only=audio_only,
+            gallery=gallery,
             playlist=playlist,
             write_metadata=write_metadata,
             sub_langs=sub_langs,
@@ -499,6 +598,87 @@ def has_partial_files(out_dir: "Path | str") -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Self-update — keep extractors fresh (the #1 cause of "unknown site" failures)
+# ---------------------------------------------------------------------------
+
+# yt-dlp's nightly channel ships extractor fixes days before the stable release,
+# which matters most for the unfamiliar/changing sites this tool targets.
+YTDLP_NIGHTLY = (
+    "yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds"
+    "/releases/latest/download/yt-dlp.tar.gz"
+)
+
+
+def _pkg_version(pkg: str) -> str:
+    """Return the installed version of a pip package, or 'unknown'."""
+    import subprocess
+    import sys
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "show", pkg],
+            capture_output=True, text=True, timeout=15,
+        )
+        for ln in r.stdout.splitlines():
+            if ln.lower().startswith("version:"):
+                return ln.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def update_tools(
+    log: LogFn = _print_log,
+    *,
+    include_gallery: bool = True,
+    timeout: int = 180,
+) -> bool:
+    """Update yt-dlp (nightly) and, if installed, gallery-dl.
+
+    Returns True if any package changed version. Safe to call from a background
+    thread; logs progress through ``log``. This is the single highest-leverage
+    robustness lever — a stale extractor is the most common reason an unknown or
+    changing site stops working.
+    """
+    import subprocess
+    import sys
+
+    changed = False
+    jobs: "list[tuple[str, list[str]]]" = [
+        ("yt-dlp", ["-U", "--force-reinstall", "--no-deps", YTDLP_NIGHTLY]),
+    ]
+    if include_gallery and _GALLERY_DL_OK:
+        jobs.append(("gallery-dl", ["-U", "gallery-dl"]))
+
+    for name, args in jobs:
+        before = _pkg_version(name)
+        log(f"Updating {name}…", "info")
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", *args],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except Exception as exc:
+            log(f"  {name} update failed: {exc}", "error")
+            continue
+        if r.returncode != 0:
+            out = (r.stdout or "") + (r.stderr or "")
+            if "WinError 32" in out or "being used by another process" in out:
+                log(f"  {name} files are locked — close the app and update "
+                    f"from a terminal.", "error")
+            else:
+                for line in out.strip().splitlines()[-8:]:
+                    log(f"  {line}", "error")
+            continue
+        after = _pkg_version(name)
+        if after != before:
+            log(f"  {name}: {before} → {after}", "success")
+            changed = True
+        else:
+            log(f"  {name} already current ({after}).", "success")
+    return changed
+
+
 def check_dependencies() -> bool:
     """Check for yt-dlp and ffmpeg. Prints warnings. Returns False if yt-dlp is missing."""
     import shutil as _sh
@@ -509,6 +689,9 @@ def check_dependencies() -> bool:
     if _sh.which("ffmpeg") is None:
         print("[WARN] ffmpeg not found — video merging and audio conversion will fail.")
         print("[WARN] Install from: https://ffmpeg.org/download.html")
+    if not _GALLERY_DL_OK:
+        print("[WARN] gallery-dl not found — photo/carousel downloads (Instagram, "
+              "Twitter/X, …) are disabled. Install with: pip install gallery-dl")
     return ok
 
 
