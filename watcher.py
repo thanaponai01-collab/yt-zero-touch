@@ -19,7 +19,6 @@ Workflow:
     4. Save the file — download starts instantly
 """
 
-import re
 import argparse
 import threading
 import time
@@ -31,19 +30,13 @@ from ytdlp_skill import (
     Downloader,
     load_history, save_history,
     check_disk_space, has_partial_files, check_dependencies,
-    _KNOWN_DOMAINS, _print_log,
+    _KNOWN_DOMAINS, _print_log, URL_RE,
 )
 from orchestrator import download_with_retry, BatchPolicy, DownloadOutcome
 
 # ---------------------------------------------------------------------------
-# URL detection
+# URL detection — URL_RE comes from ytdlp_skill so the GUI and watcher don't drift.
 # ---------------------------------------------------------------------------
-
-URL_RE = re.compile(
-    r'https?://(?:www\.)?'
-    r'[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}'
-    r'\b[-a-zA-Z0-9()@:%_\+.~#?&/=]*'
-)
 
 
 def is_known_domain(url: str) -> bool:

@@ -129,6 +129,14 @@ _GDRIVE_RE = re.compile(
     r'drive\.google\.com/(?:file/d/|open\?.*?id=|uc\?.*?id=)([a-zA-Z0-9_-]+)'
 )
 
+# Shared URL finder — used to pull links out of pasted text (app.py) and
+# watched files (watcher.py) so the two front-ends don't drift apart.
+URL_RE = re.compile(
+    r'https?://(?:www\.)?'
+    r'[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}'
+    r'\b[-a-zA-Z0-9()@:%_\+.~#?&/=]*'
+)
+
 # Hosts where photos / carousels / image galleries are the point — gallery-dl
 # is the right tool here (yt-dlp is video-only and will fail on a photo post).
 # A URL on one of these hosts is routed to gallery-dl when the user picks

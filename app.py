@@ -10,10 +10,9 @@ import tkinter as tk
 from tkinter import filedialog, scrolledtext
 import threading
 import subprocess
-import re
 from pathlib import Path
 
-from ytdlp_skill import load_history, Downloader, QUALITY_PRESETS, update_tools
+from ytdlp_skill import load_history, Downloader, QUALITY_PRESETS, update_tools, URL_RE
 from orchestrator import run_batch, BatchPolicy
 
 try:
@@ -52,9 +51,7 @@ COLORS = {
     "btn_hover": "#c73652",
 }
 
-URL_RE = re.compile(r'https?://[^\s"<>\']+')
-
-# URL resolution, download engine, and history are provided by ytdlp_skill.
+# URL resolution, download engine, history, and URL_RE are provided by ytdlp_skill.
 
 # ---------------------------------------------------------------------------
 # App
