@@ -194,6 +194,85 @@ def _download_gdrive(file_id: str, out_dir: Path, log: LogFn) -> bool:
         return False
 
 
+# Hosts that redirect anonymous visitors to a login page — for these, a logged-in
+# browser session is effectively mandatory, so we auto-borrow browser cookies when
+# the user hasn't supplied any.
+_LOGIN_WALLED_HOSTS = ("instagram.com", "facebook.com", "threads.net")
+
+# Order to try auto-extracting cookies from when none are supplied. First one that
+# has a usable, logged-in session for the host wins.
+_BROWSER_COOKIE_ORDER = ("chrome", "edge", "brave", "firefox", "opera", "vivaldi")
+
+# gallery-dl's login-redirect / rate-limit signatures — used to give the user a
+# clear, actionable message instead of a raw stack trace.
+_GALLERY_LOGIN_SIGNS = (
+    "login", "redirect", "403", "401", "not logged in",
+    "no valid session", "checkpoint", "challenge",
+)
+
+
+def _is_login_walled(url: str) -> bool:
+    return any(h in url for h in _LOGIN_WALLED_HOSTS)
+
+
+def _detect_browsers() -> "list[str]":
+    """Return installed browsers (best-effort, Windows-focused) in preference order.
+
+    We only *offer* a browser to gallery-dl/yt-dlp if its profile dir plausibly
+    exists — trying to read cookies from a browser that isn't installed just wastes
+    a subprocess and prints a scary error.
+    """
+    import os
+    import sys
+
+    candidates: "dict[str, list[Path]]" = {}
+    if sys.platform.startswith("win"):
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        roaming = Path(os.environ.get("APPDATA", ""))
+        candidates = {
+            "chrome":  [local / "Google/Chrome/User Data"],
+            "edge":    [local / "Microsoft/Edge/User Data"],
+            "brave":   [local / "BraveSoftware/Brave-Browser/User Data"],
+            "vivaldi": [local / "Vivaldi/User Data"],
+            "opera":   [roaming / "Opera Software/Opera Stable"],
+            "firefox": [roaming / "Mozilla/Firefox/Profiles"],
+        }
+    else:
+        home = Path.home()
+        candidates = {
+            "chrome":  [home / ".config/google-chrome"],
+            "edge":    [home / ".config/microsoft-edge"],
+            "brave":   [home / ".config/BraveSoftware/Brave-Browser"],
+            "firefox": [home / ".mozilla/firefox"],
+        }
+    found = []
+    for name in _BROWSER_COOKIE_ORDER:
+        for p in candidates.get(name, []):
+            try:
+                if p.exists():
+                    found.append(name)
+                    break
+            except Exception:
+                pass
+    return found
+
+
+def _gallery_config_args(url: str) -> "list[str]":
+    """Extra gallery-dl -o flags that make login-walled hosts behave.
+
+    For Instagram we pin the ``rest`` API and add a conservative request delay so
+    a burst of downloads doesn't trip the login wall or get the session flagged.
+    """
+    args: "list[str]" = []
+    if "instagram.com" in url:
+        args += [
+            "-o", "instagram.api=rest",
+            "-o", "instagram.include=posts",
+            "-o", "sleep-request=2.0-4.0",
+        ]
+    return args
+
+
 def _download_gallery(
     url: str,
     out_dir: Path,
@@ -201,6 +280,8 @@ def _download_gallery(
     browser_cookie: "str | None",
     force: bool,
     log: LogFn,
+    *,
+    _auto_cookie: bool = True,
 ) -> bool:
     """Download photos / image galleries with gallery-dl (Instagram, Twitter, …).
 
@@ -208,11 +289,70 @@ def _download_gallery(
     multi-image carousels, and the videos inside those same posts. We shell out to
     it (``python -m gallery_dl``) so a gallery-dl upgrade can't break our import,
     and reuse the very same cookie options the video path uses.
+
+    Zero-touch cookies: for login-walled hosts (Instagram/Facebook/Threads) with no
+    cookies supplied, we automatically try each installed browser's logged-in
+    session in turn, so a pasted link "just works" as long as the user is signed in
+    to that site in any browser.
     """
     if not _GALLERY_DL_OK:
         log("gallery-dl not installed — run: pip install gallery-dl", "error")
         return False
 
+    # Build the ordered list of cookie sources to try.
+    # 1) explicit cookies.txt  2) explicit browser  3) auto-detected browsers.
+    cookie_sources: "list[tuple[str, str | None]]" = []
+    if cookie_file and cookie_file.exists():
+        cookie_sources.append(("file", str(cookie_file)))
+    elif browser_cookie:
+        cookie_sources.append(("browser", browser_cookie))
+    elif _auto_cookie and _is_login_walled(url):
+        detected = _detect_browsers()
+        if detected:
+            log(f"No cookies given — auto-trying logged-in browser session "
+                f"({', '.join(detected)})…", "info")
+            cookie_sources = [("browser", b) for b in detected]
+        else:
+            cookie_sources.append(("none", None))
+    else:
+        cookie_sources.append(("none", None))
+
+    last_login_wall = False
+    for kind, value in cookie_sources:
+        ok, login_wall = _run_gallery_dl(
+            url, out_dir, kind, value, force, log,
+            quiet_errors=(len(cookie_sources) > 1),
+        )
+        if ok:
+            return True
+        last_login_wall = login_wall
+        if not login_wall:
+            # A non-login failure (e.g. deleted post, network) won't be fixed by
+            # trying another browser's cookies — stop here.
+            break
+
+    if last_login_wall and _is_login_walled(url):
+        log("Instagram/Facebook needs you to be logged in. Fix once, works forever:",
+            "warn")
+        log("  1) Open instagram.com in Chrome/Edge/Firefox and log in.", "warn")
+        log("  2) Keep that browser installed — the app borrows its session "
+            "automatically.", "warn")
+        log("  (Or pick your browser in the cookie dropdown / supply a cookies.txt.)",
+            "warn")
+    return False
+
+
+def _run_gallery_dl(
+    url: str,
+    out_dir: Path,
+    cookie_kind: str,
+    cookie_value: "str | None",
+    force: bool,
+    log: LogFn,
+    *,
+    quiet_errors: bool = False,
+) -> "tuple[bool, bool]":
+    """Run gallery-dl once. Returns (success, hit_login_wall)."""
     import subprocess
     import sys
 
@@ -220,39 +360,48 @@ def _download_gallery(
     cmd = [
         sys.executable, "-m", "gallery_dl",
         "--dest", str(out_dir),
-        # gallery-dl skips files it already has by default; --no-skip forces a
-        # re-download when the user ticks Re-download.
         *(["--no-skip"] if force else []),
+        *_gallery_config_args(url),
     ]
-    if cookie_file and cookie_file.exists():
-        cmd += ["--cookies", str(cookie_file)]
-    elif browser_cookie:
-        cmd += ["--cookies-from-browser", browser_cookie]
+    if cookie_kind == "file":
+        cmd += ["--cookies", cookie_value]
+    elif cookie_kind == "browser":
+        cmd += ["--cookies-from-browser", cookie_value]
+        log(f"Downloading images with gallery-dl (cookies: {cookie_value})…", "info")
+    if cookie_kind != "browser":
+        log("Downloading images with gallery-dl…", "info")
     cmd.append(url)
 
-    log("Downloading images with gallery-dl…", "info")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     except subprocess.TimeoutExpired:
         log("  gallery-dl timed out after 600s", "error")
-        return False
+        return False, False
     except Exception as exc:
         log(f"  gallery-dl error: {exc}", "error")
-        return False
+        return False, False
 
     for line in (proc.stdout or "").splitlines():
         log(f"  {line}", "muted")
-    if proc.returncode != 0:
-        # gallery-dl prints the real cause to stderr — surface the tail as
-        # "error" so the orchestrator's classifier/retry sees it.
-        tail = (proc.stderr or "").strip().splitlines()[-5:]
-        for line in tail:
-            log(f"  {line}", "error")
-        if not tail:
-            log(f"  gallery-dl exited with code {proc.returncode}", "error")
-        return False
-    log("  gallery-dl finished.", "success")
-    return True
+
+    if proc.returncode == 0 and (proc.stdout or "").strip():
+        log("  gallery-dl finished.", "success")
+        return True, False
+
+    err = (proc.stderr or "") + (proc.stdout or "")
+    login_wall = any(s in err.lower() for s in _GALLERY_LOGIN_SIGNS)
+    # returncode 0 but no output usually means "found nothing" (often a silent
+    # login redirect) — treat it as a login wall so we try the next cookie source.
+    if proc.returncode == 0 and not (proc.stdout or "").strip():
+        login_wall = login_wall or _is_login_walled(url)
+
+    tail = err.strip().splitlines()[-5:]
+    err_tag = "muted" if quiet_errors else "error"
+    for line in tail:
+        log(f"  {line}", err_tag)
+    if not tail:
+        log(f"  gallery-dl exited with code {proc.returncode}", err_tag)
+    return False, login_wall
 
 
 def download(
