@@ -159,6 +159,7 @@ class BatchPolicy:
     force: bool = False
     write_metadata: bool = False
     playlist: bool = False
+    sections: "str | None" = None    # e.g. "10:00-20:00" — trim to a clip
     max_workers: int = 3
     retry_max: int = 3
     retry_delays: tuple = (5, 15, 30)
@@ -198,6 +199,7 @@ def download_with_retry(
     idx: "int | None" = None,
     log: LogFn = _print_log,
     set_status: "Callable[[str], None]" = lambda *_: None,
+    set_item: "Callable[[str, float | None], None]" = lambda *a: None,
     sleep: "Callable[[float], None]" = time.sleep,
 ) -> DownloadOutcome:
     """Run download_fn, retrying transient failures with backoff.
@@ -206,11 +208,30 @@ def download_with_retry(
     messages logged with tag "error" are captured and classified; a permanent
     failure short-circuits the retry loop. Returns a DownloadOutcome carrying
     the classified cause on failure (and truthy iff it succeeded).
+
+    set_item(status, pct) is an optional per-row callback for a queue/progress
+    table: status is one of "downloading"/"merging"/"retrying"/"failed", and pct
+    is a 0–100 float while downloading (None otherwise).
     """
     prefix = f"[#{idx}] " if idx is not None else ""
 
     def base_log(msg: str, tag: str = "info"):
         log(f"{prefix}{msg}", tag)
+
+    def _pct_float(d: dict) -> "float | None":
+        # Prefer exact byte ratio; fall back to the pre-formatted percent string.
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        got   = d.get("downloaded_bytes")
+        if total and got is not None:
+            try:
+                return max(0.0, min(100.0, got / total * 100.0))
+            except Exception:
+                pass
+        raw = (d.get("_percent_str") or "").strip().rstrip("%")
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            return None
 
     def progress_hook(d: dict):
         if d["status"] == "downloading":
@@ -218,10 +239,13 @@ def download_with_retry(
             speed = d.get("_speed_str", "?").strip()
             eta   = d.get("_eta_str", "?").strip()
             set_status(f"Downloading  {pct}  •  {speed}  •  ETA {eta}")
+            set_item("downloading", _pct_float(d))
         elif d["status"] == "finished":
             set_status("Merging…")
+            set_item("merging", 100.0)
 
     base_log(f"Starting: {url[:80]}", "accent")
+    set_item("downloading", None)
 
     last_errors: list[str] = []
     for attempt in range(1, policy.retry_max + 2):
@@ -239,17 +263,20 @@ def download_with_retry(
         failure = classify_failure(captured_errors)
         if failure and failure.permanent:
             base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
+            set_item("failed", None)
             return DownloadOutcome(ok=False, failure=failure)
 
         if attempt <= policy.retry_max:
             delay = policy.retry_delays[attempt - 1]
             base_log(f"  Attempt {attempt} failed — retrying in {delay}s…", "warn")
+            set_item("retrying", None)
             for s in range(delay, 0, -1):
                 label = f"#{idx} " if idx is not None else ""
                 set_status(f"Retry #{attempt} for {label}in {s}s…")
                 sleep(1)
 
     base_log(f"  All {policy.retry_max + 1} attempts failed.", "error")
+    set_item("failed", None)
     return DownloadOutcome(ok=False, failure=classify_failure(last_errors))
 
 
@@ -273,6 +300,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
             browser_cookie=policy.browser_cookie,
             force=policy.force,
             out_template=tpl,
+            sections=policy.sections,
             log=log,
             progress_hook=progress_hook,
             pre_resolved=True,
@@ -290,6 +318,7 @@ def run_batch(
     history_path: "Path | str",
     log: LogFn = _print_log,
     set_status: "Callable[[str], None]" = lambda *_: None,
+    on_item: "Callable[[int, str, str, float | None], None]" = lambda *a: None,
     resolve_fn: "Callable" = resolve_url,
     browser_factory: "Callable" = _launch_temp_browser,
     playwright_ok: bool = _PLAYWRIGHT_OK,
@@ -300,6 +329,10 @@ def run_batch(
     warm (created here, in the calling thread — Playwright's sync greenlet
     dispatcher binds to its creating thread). Phase 2 downloads concurrently,
     retrying transient failures and recording successes to history.
+
+    on_item(idx, url, status, pct) is an optional callback for a per-URL queue
+    table. status ∈ {"resolving","queued","skipped","downloading","merging",
+    "retrying","done","failed"}; pct is a 0–100 float while downloading, else None.
     """
     result = BatchResult()
     policy.out_dir.mkdir(parents=True, exist_ok=True)
@@ -317,15 +350,18 @@ def run_batch(
             ts = datetime.now().strftime("%H:%M:%S")
             if url in history and not policy.force:
                 log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
+                on_item(idx, url, "skipped", None)
                 continue
             if policy.gallery:
                 resolved, tpl = url, ""        # gallery-dl ignores the template
             else:
                 log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
+                on_item(idx, url, "resolving", None)
                 resolved = resolve_fn(
                     url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
                 )
                 tpl = build_output_template(idx, url, resolved, len(urls), pad)
+            on_item(idx, url, "queued", None)
             work_items.append((idx, url, resolved, tpl))
     finally:
         if worker_browser:
@@ -345,12 +381,17 @@ def run_batch(
     set_status(f"0 / {total} done")
 
     # ── Phase 2: concurrent downloads ──────────────────────────────────────
+    def _item_cb(i, u):
+        # Bind idx/url so download_with_retry only needs (status, pct).
+        return lambda status, pct=None: on_item(i, u, status, pct)
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(
                 download_with_retry,
                 _make_download_fn(downloader, policy, resolved, tpl),
                 policy=policy, url=url, idx=idx, log=log, set_status=set_status,
+                set_item=_item_cb(idx, url),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
         }
@@ -368,11 +409,13 @@ def run_batch(
                     save_history(history_path, history)
                 done[0] += 1
                 set_status(f"{done[0]} / {total} done")
+                on_item(idx, url, "done", 100.0)
             else:
                 if outcome.failure:
                     log(f"  [#{idx}] {outcome.failure.label}: {outcome.failure.remedy}", "warn")
                 else:
                     log(f"  [#{idx}] Download failed.", "error")
+                on_item(idx, url, "failed", None)
                 result.failures.append((idx, url, outcome.failure))
 
     result.succeeded = done[0]

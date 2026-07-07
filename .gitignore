@@ -8,6 +8,7 @@ downloads/
 
 # Runtime data (not source code)
 processed_urls.json
+settings.json
 cookies.txt
 .last_update_check
 

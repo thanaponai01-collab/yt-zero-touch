@@ -76,6 +76,7 @@ def _download_worker(
     playlist: bool,
     sub_langs: list[str],
     gallery: bool = False,
+    sections: "str | None" = None,
 ) -> DownloadOutcome:
     """Run in a thread — returns a DownloadOutcome (truthy on success, carrying
     the classified failure cause otherwise).
@@ -94,6 +95,7 @@ def _download_worker(
             playlist=playlist,
             write_metadata=True,
             sub_langs=sub_langs,
+            sections=None if gallery else sections,
             log=log,
             progress_hook=progress_hook,
         )
@@ -111,6 +113,7 @@ def watch(
     playlist: bool = False,
     sub_langs: list[str] | None = None,
     gallery: bool = False,
+    sections: "str | None" = None,
 ):
     sub_langs = sub_langs or []
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,7 +231,7 @@ def watch(
 
                             future = executor.submit(
                                 _download_worker, dl, url, out_dir, audio_only,
-                                playlist, sub_langs, gallery,
+                                playlist, sub_langs, gallery, sections,
                             )
                             in_flight[url] = future
 
@@ -314,6 +317,12 @@ def main():
         default=None,
         help="Comma-separated subtitle language codes, e.g. en,th (default: none)",
     )
+    parser.add_argument(
+        "--sections",
+        default=None,
+        help="Trim to a time range, e.g. 10:00-20:00 (applies to every URL; "
+             "ignored for playlists and --photos)",
+    )
     args = parser.parse_args()
     cfile = Path(args.cookies) if args.cookies else None
     sub_langs = [s.strip() for s in args.sub_langs.split(",")] if args.sub_langs else []
@@ -327,6 +336,7 @@ def main():
         playlist=args.playlist,
         sub_langs=sub_langs,
         gallery=args.photos,
+        sections=args.sections,
     )
 
 

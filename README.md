@@ -13,6 +13,14 @@ no terminal needed.
 ## Features
 
 - Paste one or multiple URLs — concurrent downloads (up to 3 at once)
+- **Clipboard watch** — tick "Watch clipboard" and any link you copy anywhere
+  drops straight into the URL box (truest zero-touch)
+- **Live queue table** — one row per URL showing status (queued → downloading X%
+  → merging → done / failed), so you're not squinting at the log
+- **Remembers your last settings** — output folder, quality, cookie choice,
+  subtitles, and trim range are restored on the next launch (`settings.json`)
+- **Trim clip** — enter a time range like `10:00-20:00` to download just that
+  slice of a long video instead of the whole thing
 - Quality selector: Best, 4K, 1080p, 720p, 480p, Audio only
 - **Photos mode** — download images & carousels via gallery-dl (Instagram, Twitter/X,
   Reddit, Pinterest, Imgur, Tumblr, …); image links also fall back to it automatically
@@ -89,6 +97,21 @@ python app.py
 4. Click **DOWNLOAD** (or press `Ctrl+Enter`)
 
 Downloads are saved to a `downloads/` folder next to the app by default.
+
+### Trimming a clip out of a long video
+
+Type a time range into **Trim clip**, then download as usual:
+
+```
+10:00-20:00     # from 10 to 20 minutes
+*00:30-01:45    # a leading * is fine (yt-dlp syntax)
+90-120          # bare seconds
+0:30-1:00, 2:00-2:30   # multiple ranges, comma-separated
+```
+
+Cuts are made at the nearest keyframes so the clip starts and ends cleanly.
+Trim is ignored for playlists and in Photos mode. From the CLI watcher:
+`python watcher.py --sections 10:00-20:00`.
 
 ### Downloading photos (Instagram, Twitter/X, Reddit, …)
 

@@ -155,6 +155,53 @@ def is_image_host(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Section trim — grab just a clip out of a long video (--download-sections)
+# ---------------------------------------------------------------------------
+
+def _parse_timestamp(t: str) -> "float | None":
+    """Parse 'SS', 'MM:SS', or 'HH:MM:SS' (fractions allowed) into seconds."""
+    t = t.strip()
+    if not t:
+        return None
+    try:
+        parts = [float(p) for p in t.split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return None
+
+
+def parse_sections(spec: "str | None") -> "list[tuple[float, float]] | None":
+    """Turn a human time-range spec into (start, end) second pairs for yt-dlp.
+
+    Accepts things like '10:00-20:00', '*00:10-01:30', '90-120', and
+    comma-separated multiples '0:30-1:00, 2:00-2:30'. A leading '*' (yt-dlp's
+    own syntax) is tolerated. Returns None when nothing valid is found.
+    """
+    if not spec:
+        return None
+    spec = spec.strip().lstrip("*").strip()
+    ranges: "list[tuple[float, float]]" = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk or "-" not in chunk:
+            continue
+        start_s, end_s = chunk.split("-", 1)
+        start = _parse_timestamp(start_s)
+        end   = _parse_timestamp(end_s)
+        start = 0.0 if start is None else start
+        if end is None or end <= start:
+            continue
+        ranges.append((start, end))
+    return ranges or None
+
+
+# ---------------------------------------------------------------------------
 # Core download functions
 # ---------------------------------------------------------------------------
 
@@ -418,6 +465,7 @@ def download(
     force: bool = False,
     fmt: "str | None" = None,
     out_template: "str | None" = None,
+    sections: "str | None" = None,
     log: LogFn = _print_log,
     progress_hook: "Callable[[dict], None] | None" = None,
     pre_resolved: bool = False,
@@ -440,6 +488,8 @@ def download(
         force:          Re-download even if file already exists.
         fmt:            Override yt-dlp format string.
         out_template:   Override yt-dlp -o template (relative to out_dir).
+        sections:       Time-range spec to trim to, e.g. "10:00-20:00" (video/audio
+                        only; ignored for playlists and gallery downloads).
         log:            Callable(msg, tag) for progress output.
         progress_hook:  Optional yt-dlp progress_hook (called with dict containing
                         status/_percent_str/_speed_str/_eta_str/filename).
@@ -485,9 +535,24 @@ def download(
     if not _YT_DLP_API_OK:
         log("yt-dlp is not installed — run: pip install yt-dlp", "error")
         return False
+
+    # Section trim only makes sense for a single video/audio item — a playlist
+    # would try to apply one time-range to every entry, which is never intended.
+    parsed_sections = None
+    if sections and not playlist:
+        parsed_sections = parse_sections(sections)
+        if parsed_sections:
+            pretty = ", ".join(f"{s:g}s–{e:g}s" for s, e in parsed_sections)
+            log(f"Trimming to section(s): {pretty}", "info")
+        else:
+            log(f"Couldn't parse section '{sections}' — downloading in full.", "warn")
+    elif sections and playlist:
+        log("Section trim ignored for playlists.", "warn")
+
     ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, cookie_file, browser_cookie, force, log, progress_hook,
+        sections=parsed_sections,
     )
     # Auto-fallback: an Instagram/Twitter/… link that yt-dlp can't handle is
     # usually a photo or carousel — let gallery-dl take a turn before giving up.
@@ -510,6 +575,7 @@ def _download_api(
     force: bool = False,
     log: LogFn = _print_log,
     extra_progress_hook: "Callable[[dict], None] | None" = None,
+    sections: "list[tuple[float, float]] | None" = None,
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -601,6 +667,16 @@ def _download_api(
     elif browser_cookie:
         ydl_opts["cookiesfrombrowser"] = (browser_cookie,)
 
+    if sections:
+        try:
+            from yt_dlp.utils import download_range_func
+            ydl_opts["download_ranges"] = download_range_func(None, sections)
+            # Cut on the nearest keyframes so the clip starts/ends cleanly rather
+            # than at a random inter-frame (needs a re-encode of the boundary).
+            ydl_opts["force_keyframes_at_cuts"] = True
+        except Exception as exc:
+            log(f"  Section trim unavailable ({exc}) — downloading full video.", "warn")
+
     try:
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ret = ydl.download([resolved])
@@ -673,6 +749,7 @@ class Downloader:
         force: bool = False,
         fmt: "str | None" = None,
         out_template: "str | None" = None,
+        sections: "str | None" = None,
         log: "LogFn | None" = None,
         progress_hook: "Callable[[dict], None] | None" = None,
         pre_resolved: bool = False,
@@ -694,6 +771,7 @@ class Downloader:
             force=force,
             fmt=fmt,
             out_template=out_template,
+            sections=sections,
             log=log or self.log,
             progress_hook=progress_hook,
             pre_resolved=pre_resolved,
