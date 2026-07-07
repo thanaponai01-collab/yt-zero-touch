@@ -101,6 +101,101 @@ class TestGalleryRouting(unittest.TestCase):
         mg.assert_not_called()
 
 
+class TestDownloadApiOptions(unittest.TestCase):
+    """Locks in the format/merge-tuning ydl_opts built by _download_api."""
+
+    def _captured_opts(self, audio_only=False):
+        captured = {}
+
+        class _FakeYDL:
+            def __init__(self, opts):
+                captured.update(opts)
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+            def download(self, urls):
+                return 0
+
+        with mock.patch.object(ytdlp_skill._yt_dlp, "YoutubeDL", _FakeYDL):
+            ytdlp_skill._download_api(
+                "https://youtube.com/watch?v=abc",
+                Path("out") / "%(title)s.%(ext)s",
+                ytdlp_skill.FORMAT_AUDIO if audio_only else ytdlp_skill.FORMAT_VIDEO,
+                audio_only, False, False, [], None, None,
+            )
+        return captured
+
+    def test_no_codec_filters_in_default_format(self):
+        self.assertEqual(ytdlp_skill.FORMAT_VIDEO, "bestvideo+bestaudio/best")
+        for preset in ytdlp_skill.QUALITY_PRESETS.values():
+            self.assertNotIn("vcodec", preset)
+            self.assertNotIn("ext=m4a", preset)
+
+    def test_video_download_tunes_concurrency_and_format_sort(self):
+        opts = self._captured_opts(audio_only=False)
+        self.assertEqual(opts["concurrent_fragment_downloads"], 8)
+        self.assertEqual(opts["http_chunk_size"], 10485760)
+        self.assertEqual(
+            opts["format_sort"], ["res", "fps", "vcodec:h264", "channels", "abr"]
+        )
+        self.assertEqual(opts["postprocessor_args"]["merger"], ytdlp_skill.PREMIERE_MERGE_ARGS)
+        self.assertEqual(len(opts["postprocessor_hooks"]), 1)
+
+    def test_audio_only_skips_merger_args(self):
+        opts = self._captured_opts(audio_only=True)
+        self.assertNotIn("postprocessor_args", opts)
+        self.assertNotIn("postprocessor_hooks", opts)
+
+    def _run_hook(self, opts, vcodec, acodec):
+        hook = opts["postprocessor_hooks"][0]
+        hook({
+            "postprocessor": "Merger",
+            "status": "started",
+            "info_dict": {"requested_formats": [
+                {"acodec": "none", "vcodec": vcodec},
+                {"acodec": acodec, "vcodec": "none"},
+            ]},
+        })
+        return opts["postprocessor_args"]["merger"]
+
+    def test_merge_hook_full_copy_for_h264_plus_aac(self):
+        opts = self._captured_opts(audio_only=False)
+        merger_args = self._run_hook(opts, "avc1.640028", "mp4a.40.2")
+        self.assertEqual(merger_args, ytdlp_skill.PREMIERE_MERGE_ARGS_COPY_AUDIO)
+
+    def test_merge_hook_transcodes_audio_only_for_h264_plus_opus(self):
+        opts = self._captured_opts(audio_only=False)
+        merger_args = self._run_hook(opts, "avc1.640028", "opus")
+        self.assertEqual(merger_args, ytdlp_skill.PREMIERE_MERGE_ARGS)
+
+    def test_merge_hook_transcodes_video_only_for_vp9_plus_aac(self):
+        # >1080p source with AAC audio already — video needs the H.264
+        # fallback for Premiere compatibility, audio can still be copied.
+        opts = self._captured_opts(audio_only=False)
+        merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
+        self.assertEqual(
+            merger_args, [*ytdlp_skill._H264_TRANSCODE_ARGS, "-movflags", "+faststart"]
+        )
+
+    def test_merge_hook_transcodes_both_for_av1_plus_opus(self):
+        opts = self._captured_opts(audio_only=False)
+        merger_args = self._run_hook(opts, "av01.0.05M.08", "opus")
+        self.assertEqual(
+            merger_args,
+            [*ytdlp_skill._H264_TRANSCODE_ARGS, "-c:a", "aac", "-b:a", "192k",
+             "-movflags", "+faststart"],
+        )
+
+    def test_merge_hook_ignores_other_postprocessors(self):
+        opts = self._captured_opts(audio_only=False)
+        hook = opts["postprocessor_hooks"][0]
+        hook({"postprocessor": "Metadata", "status": "started", "info_dict": {}})
+        self.assertEqual(
+            opts["postprocessor_args"]["merger"], ytdlp_skill.PREMIERE_MERGE_ARGS
+        )
+
+
 class TestParseSections(unittest.TestCase):
     def test_basic_range(self):
         from ytdlp_skill import parse_sections

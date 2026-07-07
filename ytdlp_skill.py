@@ -69,57 +69,90 @@ except ImportError:
 # Public constants — override before calling download() if needed
 # ---------------------------------------------------------------------------
 
-FORMAT_VIDEO = (
-    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]"
-    "/bestvideo[ext=mp4][vcodec!^=av01]+bestaudio[ext=m4a]"
-    "/bestvideo[vcodec!^=av01]+bestaudio[ext=m4a]"
-    "/bestvideo[vcodec!^=av01]+bestaudio"
-    "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
-    "/bestvideo+bestaudio"
-    "/best"
-)
+# Plain height-capped selectors — no codec filters. Codec preference is left
+# to "format_sort" below (ydl_opts) so it can't accidentally exclude a whole
+# resolution tier: an avc1-first filter here caps "Best"/"4K" at 1080p, since
+# YouTube only serves H.264 up to 1080p and a valid avc1 match always wins
+# before the real 4K/VP9/AV1 streams are ever considered.
+FORMAT_VIDEO = "bestvideo+bestaudio/best"
 FORMAT_AUDIO = "bestaudio/best"
 
-# Quality presets — prefer H.264 + AAC (Premiere-ready) at each resolution.
-# Falls back to any codec so the download always succeeds, then the merger
-# step re-encodes audio to AAC regardless of what was selected.
+# Quality presets, height-capped only. "format_sort" (ydl_opts) ranks by
+# resolution first and prefers H.264 *within* a resolution — so ≤1080p
+# output is unchanged (Premiere-native H.264) but 1440p/4K now actually
+# downloads instead of silently falling back to a 1080p avc1 stream.
 QUALITY_PRESETS: dict[str, str] = {
-    "Best": (
-        "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]"
-        "/bestvideo[vcodec^=avc1]+bestaudio"
-        "/bestvideo+bestaudio/best"
-    ),
-    "4K": (
-        "bestvideo[height<=2160][vcodec^=avc1]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=2160][vcodec^=avc1]+bestaudio"
-        "/bestvideo[height<=2160]+bestaudio/best[height<=2160]"
-    ),
-    "1080p": (
-        "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=1080][vcodec^=avc1]+bestaudio"
-        "/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-    ),
-    "720p": (
-        "bestvideo[height<=720][vcodec^=avc1]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=720][vcodec^=avc1]+bestaudio"
-        "/bestvideo[height<=720]+bestaudio/best[height<=720]"
-    ),
-    "480p": (
-        "bestvideo[height<=480][vcodec^=avc1]+bestaudio[ext=m4a]"
-        "/bestvideo[height<=480]+bestaudio/best[height<=480]"
-    ),
+    "Best":   "bestvideo+bestaudio/best",
+    "4K":     "bestvideo[height<=2160]+bestaudio/best[height<=2160]",
+    "1080p":  "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+    "720p":   "bestvideo[height<=720]+bestaudio/best[height<=720]",
+    "480p":   "bestvideo[height<=480]+bestaudio/best[height<=480]",
 }
 
-# FFmpeg args applied during the video+audio merge step.
-# -c:v copy  → keep H.264 as-is (no re-encode, fast)
-# -c:a aac   → always output AAC audio (Opus/Vorbis → AAC if needed)
-# -b:a 192k  → good broadcast-quality audio bitrate
-# -movflags +faststart → move MP4 index to front for instant Premiere import
+# FFmpeg args applied during the video+audio merge step. Video and audio are
+# each decided independently at merge time (see _merge_args below) based on
+# the actual codecs yt-dlp picked, so a single download can land on any of
+# the four copy/transcode combinations:
+# -c:v copy            → source is already H.264 (always true at ≤1080p,
+#                         since format_sort prefers it there) — no re-encode.
+# -c:v libx264 ...      → source is VP9/AV1 (i.e. >1080p, since format_sort
+#                         only reaches for those above the H.264 ceiling) —
+#                         transcoded to H.264 so the file opens in *any*
+#                         Premiere Pro version, not just 2023+'s native
+#                         VP9/AV1 decode. Slower, but that's the trade for
+#                         "safe" playback everywhere.
+# -c:a aac / -b:a 192k  → source audio isn't AAC (plain "bestaudio" means
+#                         YouTube usually hands back Opus 251) — transcode.
+# -c:a copy             → source audio is already AAC/m4a — skip the
+#                         wasteful AAC→AAC re-encode.
+# -movflags +faststart  → move MP4 index to front for instant Premiere import
+#
+# The merger's ffmpeg args always start with "-c copy" for both streams, so
+# omitting -c:v/-c:a entirely (rather than spelling out "copy") also works —
+# kept explicit here for readability.
 PREMIERE_MERGE_ARGS = [
     "-c:v", "copy",
     "-c:a", "aac", "-b:a", "192k",
     "-movflags", "+faststart",
 ]
+PREMIERE_MERGE_ARGS_COPY_AUDIO = [
+    "-c:v", "copy",
+    "-movflags", "+faststart",
+]
+
+# H.264 encode used to transcode a >1080p VP9/AV1 source down to something
+# every Premiere Pro version can decode. -crf 16 -preset slow aims for
+# visually-lossless output (close to the high-bitrate VP9/AV1 source) at the
+# cost of encode speed — tune down (e.g. -preset medium/faster, -crf 18-20)
+# if turnaround time matters more than matching source quality exactly.
+# -pix_fmt yuv420p forces 8-bit 4:2:0, since some Premiere builds choke on
+# the 10-bit HDR pixel formats 4K VP9/AV1 sources can carry.
+_H264_TRANSCODE_ARGS = [
+    "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+]
+
+# Audio codec prefixes yt-dlp reports that are already AAC — safe to copy
+# straight through instead of re-encoding AAC → AAC (generation loss for
+# nothing, since Premiere accepts AAC natively either way).
+_AAC_ACODEC_PREFIXES = ("mp4a", "aac")
+
+# Video codec prefixes yt-dlp reports that are already H.264 — safe to copy
+# straight through; anything else (vp9, av01, ...) gets the H.264 transcode
+# above so the merged file is guaranteed to open in any Premiere version.
+_H264_VCODEC_PREFIXES = ("avc1", "h264")
+
+
+def _merge_args(vcodec: str, acodec: str) -> "list[str]":
+    """Pick ffmpeg merge args based on the codecs yt-dlp actually selected."""
+    video_args = (
+        ["-c:v", "copy"] if vcodec.lower().startswith(_H264_VCODEC_PREFIXES)
+        else _H264_TRANSCODE_ARGS
+    )
+    audio_args = (
+        [] if acodec.lower().startswith(_AAC_ACODEC_PREFIXES)
+        else ["-c:a", "aac", "-b:a", "192k"]
+    )
+    return [*video_args, *audio_args, "-movflags", "+faststart"]
 
 # ---------------------------------------------------------------------------
 # Internal constants
@@ -619,6 +652,29 @@ def _download_api(
             {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
         )
 
+    def _tune_merge_args_for_premiere(status: dict):
+        """Pick the merger's ffmpeg args from the codecs yt-dlp actually
+        selected, instead of always doing the maximal re-encode.
+
+        Registered as a "postprocessor_hooks" callback, which yt-dlp calls
+        synchronously *before* the merger builds its ffmpeg command — so
+        mutating ydl_opts["postprocessor_args"] here (same dict object the
+        merger reads its args from) takes effect in time. If this never
+        fires (e.g. no merge was needed), the unconditional PREMIERE_MERGE_ARGS
+        default set below stays in effect.
+        """
+        if status.get("postprocessor") != "Merger" or status.get("status") != "started":
+            return
+        formats = (status.get("info_dict") or {}).get("requested_formats") or []
+        video_fmt = next((f for f in formats if f.get("vcodec") not in (None, "none")), None)
+        audio_fmt = next((f for f in formats if f.get("acodec") not in (None, "none")), None)
+        vcodec = ((video_fmt or {}).get("vcodec") or "").lower()
+        acodec = ((audio_fmt or {}).get("acodec") or "").lower()
+        if not vcodec.startswith(_H264_VCODEC_PREFIXES):
+            log(f"  >1080p source is {vcodec or 'non-H.264'} — transcoding to "
+                f"H.264 for Premiere compatibility (this takes longer)…", "info")
+        ydl_opts["postprocessor_args"]["merger"] = _merge_args(vcodec, acodec)
+
     ydl_opts: dict = {
         "format":                        fmt,
         "outtmpl":                       str(outtmpl),
@@ -636,12 +692,23 @@ def _download_api(
         "logger":                        _Logger(),
         "progress_hooks":                [_progress] + ([extra_progress_hook] if extra_progress_hook else []),
         "postprocessors":                postprocessors,
-        # Force H.264+AAC in the merge step so Premiere Pro can open the file
-        # without re-encoding.  c:v copy keeps H.264 as-is; c:a aac converts
-        # any Opus/Vorbis audio to AAC.  Skipped for audio-only downloads.
-        **({"postprocessor_args": {"merger": PREMIERE_MERGE_ARGS}} if not audio_only else {}),
+        # Merge step tuned for guaranteed-safe Premiere playback. Defaults to
+        # the maximal transcode variant; _tune_merge_args_for_premiere swaps
+        # in the cheaper copy/transcode combination that actually matches the
+        # selected video/audio codecs once they're known (see _merge_args).
+        # Skipped for audio-only downloads (no video/audio merge happens there).
+        **({
+            "postprocessor_args": {"merger": PREMIERE_MERGE_ARGS},
+            "postprocessor_hooks": [_tune_merge_args_for_premiere],
+        } if not audio_only else {}),
+        # Rank by resolution first, then prefer H.264 *within* a resolution —
+        # keeps ≤1080p output H.264 (Premiere-native) while letting 1440p/4K
+        # actually pick the higher-res VP9/AV1 stream instead of being capped
+        # at a 1080p avc1 match (see FORMAT_VIDEO / QUALITY_PRESETS above).
+        "format_sort":                   ["res", "fps", "vcodec:h264", "channels", "abr"],
         "socket_timeout":                60,
-        "concurrent_fragment_downloads": 4,
+        "concurrent_fragment_downloads": 8,
+        "http_chunk_size":               10485760,
         "retries":                       10,
         "fragment_retries":              10,
         # tv_simply + android_vr don't require PO tokens or JS challenge solving
