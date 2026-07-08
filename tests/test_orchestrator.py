@@ -239,6 +239,33 @@ class TestRunBatch(unittest.TestCase):
         _idx, _url, failure = result.failures[0]
         self.assertEqual(failure.reason, "needs_cookies")
 
+    def test_on_item_reports_terminal_states(self):
+        # The queue-table callback must see a terminal "done" for a success and
+        # "failed" for a permanent failure, keyed by the original URL index.
+        events = []
+
+        def on_item(idx, url, status, pct):
+            events.append((idx, status))
+
+        class _MixedDownloader:
+            def download(self, resolved, **kwargs):
+                if resolved.endswith("/2"):
+                    kwargs["log"]("ERROR: Video unavailable", "error")
+                    return False
+                return True
+
+        policy = BatchPolicy(out_dir=self.tmp)
+        run_batch(
+            ["http://a/1", "http://a/2"], policy, _MixedDownloader(),
+            history=set(), history_lock=threading.Lock(),
+            history_path=self.history_path, log=lambda *a, **k: None,
+            on_item=on_item,
+            resolve_fn=lambda url, **kw: url, playwright_ok=False,
+        )
+        terminal = {(idx, st) for idx, st in events if st in ("done", "failed")}
+        self.assertIn((1, "done"), terminal)
+        self.assertIn((2, "failed"), terminal)
+
 
 if __name__ == "__main__":
     unittest.main()
