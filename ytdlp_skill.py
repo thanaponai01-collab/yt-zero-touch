@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
@@ -131,6 +132,85 @@ _H264_TRANSCODE_ARGS = [
     "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
 ]
 
+# Hardware-accelerated equivalent for machines with an NVIDIA GPU. At these
+# settings (p7 = highest-quality NVENC preset, CQ 19) output is visually on
+# par with libx264 slow for editing footage, but encodes roughly 5-10x faster
+# — a ~16-minute 4K60 software encode drops to a couple of minutes. Detected
+# once at first use (see _h264_transcode_args) with a real 3-frame test
+# encode, because h264_nvenc can be *listed* by ffmpeg builds that still fail
+# at runtime when no NVIDIA GPU/driver is present.
+_H264_NVENC_ARGS = [
+    "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
+    "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
+]
+
+_h264_encoder_cache: "list[str] | None" = None
+_h264_encoder_cache_lock = threading.Lock()
+
+
+def _nvenc_available() -> bool:
+    """True if this machine can actually encode with h264_nvenc."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2",
+             "-frames:v", "3", "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, timeout=30,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _h264_transcode_args() -> "list[str]":
+    """H.264 encode args for the >1080p fallback — NVENC when the GPU
+    supports it, libx264 slow otherwise. Detection result is cached for the
+    process lifetime."""
+    global _h264_encoder_cache
+    with _h264_encoder_cache_lock:
+        if _h264_encoder_cache is None:
+            _h264_encoder_cache = (
+                _H264_NVENC_ARGS if _nvenc_available() else _H264_TRANSCODE_ARGS
+            )
+        return _h264_encoder_cache
+
+
+# Only one heavy H.264 video transcode may run at a time, process-wide. The
+# orchestrator runs up to 3 download threads; if several of them hit the
+# >1080p transcode path simultaneously (e.g. a pasted batch of 4K links),
+# concurrent libx264 4K encodes stack multi-GB RAM allocations and can OOM
+# the machine (observed: two concurrent 4K encodes ≈ 6GB+). Downloads still
+# run in parallel — only the ffmpeg merge/transcode step is serialized, and
+# only when it actually transcodes video (pure stream copies don't take the
+# gate).
+_TRANSCODE_GATE = threading.Lock()
+
+
+def _verify_h264_output(path: "Path | str", log: LogFn) -> bool:
+    """ffprobe the final file after a transcode to confirm it really is
+    decodable H.264 — protects against a silently-truncated/corrupt output
+    (crashed encoder, full disk, OOM-killed ffmpeg) that would otherwise
+    only be discovered when the file fails to open in Premiere later."""
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except FileNotFoundError:
+        log("  ffprobe not found — skipping post-transcode verification.", "warn")
+        return True
+    except Exception as exc:
+        log(f"  Post-transcode verification errored ({exc}) — treating as failed.", "error")
+        return False
+    codec = (proc.stdout or "").strip().splitlines()[0] if proc.stdout else ""
+    if proc.returncode == 0 and codec == "h264":
+        log("  Verified: output is clean H.264 — safe for any Premiere version.", "info")
+        return True
+    log(f"  Post-transcode verification FAILED (codec={codec or 'unreadable'}) — "
+        f"the output file may be corrupt. Marking this download failed.", "error")
+    return False
+
 # Audio codec prefixes yt-dlp reports that are already AAC — safe to copy
 # straight through instead of re-encoding AAC → AAC (generation loss for
 # nothing, since Premiere accepts AAC natively either way).
@@ -146,7 +226,7 @@ def _merge_args(vcodec: str, acodec: str) -> "list[str]":
     """Pick ffmpeg merge args based on the codecs yt-dlp actually selected."""
     video_args = (
         ["-c:v", "copy"] if vcodec.lower().startswith(_H264_VCODEC_PREFIXES)
-        else _H264_TRANSCODE_ARGS
+        else _h264_transcode_args()
     )
     audio_args = (
         [] if acodec.lower().startswith(_AAC_ACODEC_PREFIXES)
@@ -652,6 +732,12 @@ def _download_api(
             {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
         )
 
+    # Per-download state shared between the merger hook and the post-download
+    # verification below: whether a video transcode happened, whether this
+    # thread currently holds the global transcode gate, and where the merged
+    # file ended up.
+    _merge_state = {"transcoded": False, "holding_gate": False, "filepath": None}
+
     def _tune_merge_args_for_premiere(status: dict):
         """Pick the merger's ffmpeg args from the codecs yt-dlp actually
         selected, instead of always doing the maximal re-encode.
@@ -663,7 +749,17 @@ def _download_api(
         fires (e.g. no merge was needed), the unconditional PREMIERE_MERGE_ARGS
         default set below stays in effect.
         """
-        if status.get("postprocessor") != "Merger" or status.get("status") != "started":
+        if status.get("postprocessor") != "Merger":
+            return
+        if status.get("status") == "finished":
+            # Remember where the merged file landed so we can ffprobe-verify
+            # it after the download, then let the next queued transcode run.
+            _merge_state["filepath"] = (status.get("info_dict") or {}).get("filepath")
+            if _merge_state["holding_gate"]:
+                _merge_state["holding_gate"] = False
+                _TRANSCODE_GATE.release()
+            return
+        if status.get("status") != "started":
             return
         formats = (status.get("info_dict") or {}).get("requested_formats") or []
         video_fmt = next((f for f in formats if f.get("vcodec") not in (None, "none")), None)
@@ -671,8 +767,19 @@ def _download_api(
         vcodec = ((video_fmt or {}).get("vcodec") or "").lower()
         acodec = ((audio_fmt or {}).get("acodec") or "").lower()
         if not vcodec.startswith(_H264_VCODEC_PREFIXES):
+            encoder = _h264_transcode_args()[1]
             log(f"  >1080p source is {vcodec or 'non-H.264'} — transcoding to "
-                f"H.264 for Premiere compatibility (this takes longer)…", "info")
+                f"H.264 ({encoder}) for Premiere compatibility (this takes longer)…",
+                "info")
+            _merge_state["transcoded"] = True
+            # Serialize heavy video encodes across all download threads —
+            # concurrent 4K libx264 encodes can OOM the machine. Blocks here
+            # until any in-flight transcode from another thread finishes.
+            if not _TRANSCODE_GATE.acquire(blocking=False):
+                log("  Waiting for another transcode to finish "
+                    "(one heavy encode at a time)…", "info")
+                _TRANSCODE_GATE.acquire()
+            _merge_state["holding_gate"] = True
         ydl_opts["postprocessor_args"]["merger"] = _merge_args(vcodec, acodec)
 
     ydl_opts: dict = {
@@ -747,10 +854,28 @@ def _download_api(
     try:
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ret = ydl.download([resolved])
-        return ret == 0
+        if ret != 0:
+            return False
+        # If the >1080p H.264 fallback ran, confirm the final file really is
+        # decodable H.264 before declaring success — "rare 4K, but when it
+        # happens it must work".
+        if _merge_state["transcoded"]:
+            merged = _merge_state["filepath"]
+            if merged and Path(merged).exists():
+                return _verify_h264_output(merged, log)
+            log("  Could not locate merged output for post-transcode "
+                "verification — check the file manually before importing.", "warn")
+        return True
     except Exception as exc:
         log(f"  yt-dlp API error: {exc}", "error")
         return False
+    finally:
+        # Safety net: if the merger crashed between "started" and "finished",
+        # the hook never released the transcode gate — release it here so a
+        # failed encode can't deadlock every later >1080p download.
+        if _merge_state["holding_gate"]:
+            _merge_state["holding_gate"] = False
+            _TRANSCODE_GATE.release()
 
 
 # ---------------------------------------------------------------------------

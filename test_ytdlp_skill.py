@@ -104,6 +104,18 @@ class TestGalleryRouting(unittest.TestCase):
 class TestDownloadApiOptions(unittest.TestCase):
     """Locks in the format/merge-tuning ydl_opts built by _download_api."""
 
+    def setUp(self):
+        # Pin the H.264 fallback to libx264 so results don't depend on
+        # whether the test machine happens to have a working NVENC GPU.
+        self._saved_encoder_cache = ytdlp_skill._h264_encoder_cache
+        ytdlp_skill._h264_encoder_cache = ytdlp_skill._H264_TRANSCODE_ARGS
+
+    def tearDown(self):
+        ytdlp_skill._h264_encoder_cache = self._saved_encoder_cache
+        # Guard against a test leaving the global transcode gate held.
+        if ytdlp_skill._TRANSCODE_GATE.locked():
+            ytdlp_skill._TRANSCODE_GATE.release()
+
     def _captured_opts(self, audio_only=False):
         captured = {}
 
@@ -149,15 +161,16 @@ class TestDownloadApiOptions(unittest.TestCase):
 
     def _run_hook(self, opts, vcodec, acodec):
         hook = opts["postprocessor_hooks"][0]
-        hook({
-            "postprocessor": "Merger",
-            "status": "started",
-            "info_dict": {"requested_formats": [
-                {"acodec": "none", "vcodec": vcodec},
-                {"acodec": acodec, "vcodec": "none"},
-            ]},
-        })
-        return opts["postprocessor_args"]["merger"]
+        info_dict = {"requested_formats": [
+            {"acodec": "none", "vcodec": vcodec},
+            {"acodec": acodec, "vcodec": "none"},
+        ]}
+        hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
+        merger_args = list(opts["postprocessor_args"]["merger"])
+        # Complete the merger lifecycle so the hook releases the global
+        # transcode gate it may have acquired on "started".
+        hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
+        return merger_args
 
     def test_merge_hook_full_copy_for_h264_plus_aac(self):
         opts = self._captured_opts(audio_only=False)
@@ -194,6 +207,90 @@ class TestDownloadApiOptions(unittest.TestCase):
         self.assertEqual(
             opts["postprocessor_args"]["merger"], ytdlp_skill.PREMIERE_MERGE_ARGS
         )
+
+    def test_transcode_gate_held_during_merge_and_released_after(self):
+        opts = self._captured_opts(audio_only=False)
+        hook = opts["postprocessor_hooks"][0]
+        info_dict = {"requested_formats": [
+            {"acodec": "none", "vcodec": "vp9"},
+            {"acodec": "mp4a.40.2", "vcodec": "none"},
+        ]}
+        hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
+        self.assertTrue(ytdlp_skill._TRANSCODE_GATE.locked())
+        hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
+        self.assertFalse(ytdlp_skill._TRANSCODE_GATE.locked())
+
+    def test_transcode_gate_not_taken_for_stream_copy(self):
+        opts = self._captured_opts(audio_only=False)
+        hook = opts["postprocessor_hooks"][0]
+        info_dict = {"requested_formats": [
+            {"acodec": "none", "vcodec": "avc1.640028"},
+            {"acodec": "opus", "vcodec": "none"},
+        ]}
+        hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
+        self.assertFalse(ytdlp_skill._TRANSCODE_GATE.locked())
+        hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
+
+
+class TestH264EncoderSelection(unittest.TestCase):
+    def setUp(self):
+        self._saved = ytdlp_skill._h264_encoder_cache
+        ytdlp_skill._h264_encoder_cache = None
+
+    def tearDown(self):
+        ytdlp_skill._h264_encoder_cache = self._saved
+
+    def test_prefers_nvenc_when_available(self):
+        with mock.patch.object(ytdlp_skill, "_nvenc_available", return_value=True):
+            self.assertEqual(
+                ytdlp_skill._h264_transcode_args(), ytdlp_skill._H264_NVENC_ARGS
+            )
+
+    def test_falls_back_to_libx264_slow(self):
+        with mock.patch.object(ytdlp_skill, "_nvenc_available", return_value=False):
+            self.assertEqual(
+                ytdlp_skill._h264_transcode_args(), ytdlp_skill._H264_TRANSCODE_ARGS
+            )
+
+    def test_detection_runs_once_and_is_cached(self):
+        with mock.patch.object(
+            ytdlp_skill, "_nvenc_available", return_value=False
+        ) as probe:
+            ytdlp_skill._h264_transcode_args()
+            ytdlp_skill._h264_transcode_args()
+            self.assertEqual(probe.call_count, 1)
+
+
+class TestVerifyH264Output(unittest.TestCase):
+    def _fake_run(self, returncode, stdout):
+        completed = mock.Mock(returncode=returncode, stdout=stdout)
+        return mock.patch.object(
+            ytdlp_skill.subprocess, "run", return_value=completed
+        )
+
+    def test_passes_for_h264_stream(self):
+        with self._fake_run(0, "h264\n"):
+            self.assertTrue(
+                ytdlp_skill._verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
+
+    def test_fails_for_wrong_or_unreadable_codec(self):
+        with self._fake_run(0, "vp9\n"):
+            self.assertFalse(
+                ytdlp_skill._verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
+        with self._fake_run(1, ""):
+            self.assertFalse(
+                ytdlp_skill._verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
+
+    def test_missing_ffprobe_skips_verification(self):
+        with mock.patch.object(
+            ytdlp_skill.subprocess, "run", side_effect=FileNotFoundError
+        ):
+            self.assertTrue(
+                ytdlp_skill._verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
 
 
 class TestParseSections(unittest.TestCase):
