@@ -24,7 +24,9 @@ Dependencies:
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -77,6 +79,22 @@ except ImportError:
 # before the real 4K/VP9/AV1 streams are ever considered.
 FORMAT_VIDEO = "bestvideo+bestaudio/best"
 FORMAT_AUDIO = "bestaudio/best"
+
+# yt-dlp needs a JS runtime (deno) to solve YouTube's signature challenge —
+# without it, formats silently degrade to whatever the fallback player
+# client serves (often 360p). shutil.which() only sees PATH as of *this*
+# process's startup, which misses a deno install added after a long-running
+# app was launched — so also check the default per-user install location
+# deno's own installer writes to (~/.deno/bin), independent of PATH/session state.
+def _find_deno() -> str | None:
+    found = shutil.which("deno")
+    if found:
+        return found
+    candidate = Path.home() / ".deno" / "bin" / ("deno.exe" if os.name == "nt" else "deno")
+    return str(candidate) if candidate.exists() else None
+
+
+_DENO_PATH = _find_deno()
 
 # Quality presets, height-capped only. "format_sort" (ydl_opts) ranks by
 # resolution first and prefers H.264 *within* a resolution — so ≤1080p
@@ -818,16 +836,22 @@ def _download_api(
         "http_chunk_size":               10485760,
         "retries":                       10,
         "fragment_retries":              10,
-        # tv_simply + android_vr don't require PO tokens or JS challenge solving
-        # and avoid the DRM experiment that hits the regular tv client.
+        # ponytail: no player_client override — yt-dlp's built-in default
+        # (tv_simply/android_vr became erratic and now often serve only
+        # format 18/360p, see yt-dlp#16150) is actively retuned upstream as
+        # YouTube's PO-token requirements shift; pin a client list again only
+        # if a specific format (e.g. Shorts) breaks with the new default.
         # generic:impersonate retries with browser impersonation on Cloudflare 403s.
         "extractor_args":                {
-            "youtube": {
-                "player_client":     ["tv_simply", "android_vr", "android", "web"],
-                "remote_components": ["ejs:github"],
-            },
             "generic": {"impersonate": [""]},
         },
+        # Top-level option, not under extractor_args — lets yt-dlp fetch its
+        # JS challenge-solver script from GitHub instead of npm.
+        "remote_components":             ["ejs:github"],
+        # Point yt-dlp straight at deno instead of relying on PATH — a
+        # long-running app process won't see PATH changes from a deno
+        # install that happened after it started.
+        **({"js_runtimes": {"deno": {"path": _DENO_PATH}}} if _DENO_PATH else {}),
     }
     if sub_langs:
         ydl_opts.update({
