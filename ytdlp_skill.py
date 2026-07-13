@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -288,6 +289,32 @@ def is_image_host(url: str) -> bool:
 # ---------------------------------------------------------------------------
 # Section trim — grab just a clip out of a long video (--download-sections)
 # ---------------------------------------------------------------------------
+
+# yt-dlp downloads a trimmed section by handing the stream to ffmpeg with
+# `-ss <start>`. Modern YouTube URLs (gir=yes) carry no seek index, so ffmpeg
+# reads *sequentially from the start* to reach the cut point — cost grows with
+# how deep the clip is. For a clip hours into a 10h video that read never
+# realistically finishes, and yt-dlp's socket_timeout does NOT bound ffmpeg, so
+# the download hangs forever with no error. Cap the wall-clock so it fails with
+# an actionable message instead.
+# ponytail: fixed 5-min ceiling; only sectioned downloads hit it. A legit clip
+# deep enough to need >5 min of reading is rare — better a clear failure than a
+# silent hang. Bump this constant if that case ever matters.
+_SECTION_DOWNLOAD_TIMEOUT_S = 300
+
+
+class _SectionTimeout(Exception):
+    """Raised from the progress hook to abort a stuck section download."""
+
+
+def _log_section_timeout(sections, log: Callable) -> None:
+    """Explain why a section download was aborted, with the fix to try next."""
+    mins = _SECTION_DOWNLOAD_TIMEOUT_S // 60
+    log(f"  Section download exceeded {mins} min and was aborted.", "error")
+    log("  ffmpeg reads from the start of the video to reach the clip, so a "
+        "clip deep in a long video can't seek quickly. Try downloading the "
+        "full video, or pick a section nearer the start.", "error")
+
 
 def _parse_timestamp(t: str) -> "float | None":
     """Parse 'SS', 'MM:SS', or 'HH:MM:SS' (fractions allowed) into seconds."""
@@ -720,8 +747,20 @@ def _download_api(
             log(f"  {msg}", "error")
 
     last_milestone = [-1]
+    section_deadline = [None]   # wall-clock cutoff, armed on first section byte
+    section_timed_out = [False]  # set by the watchdog so we can report it even
+                                 # if ignoreerrors swallows the raised exception
 
     def _progress(d: dict):
+        # Watchdog for section trims: ffmpeg seeks by reading from the start, so
+        # a clip deep in a long video can read forever. Abort past the deadline
+        # (raising here stops the download) rather than hang with no feedback.
+        if sections and d["status"] == "downloading":
+            if section_deadline[0] is None:
+                section_deadline[0] = time.monotonic() + _SECTION_DOWNLOAD_TIMEOUT_S
+            elif time.monotonic() > section_deadline[0]:
+                section_timed_out[0] = True
+                raise _SectionTimeout()
         if d["status"] == "downloading":
             pct_str = d.get("_percent_str", "").strip().rstrip("%")
             speed   = d.get("_speed_str", "?").strip()
@@ -872,12 +911,21 @@ def _download_api(
             # Cut on the nearest keyframes so the clip starts/ends cleanly rather
             # than at a random inter-frame (needs a re-encode of the boundary).
             ydl_opts["force_keyframes_at_cuts"] = True
+            # yt-dlp's socket_timeout doesn't reach the ffmpeg downloader; give
+            # ffmpeg its own read timeout so a genuinely stalled connection
+            # aborts (30s of zero bytes) instead of blocking forever. The
+            # wall-clock watchdog in _progress covers the slow-but-progressing
+            # deep-seek case that -rw_timeout can't see.
+            ydl_opts["external_downloader_args"] = {"ffmpeg_i": ["-rw_timeout", "30000000"]}
         except Exception as exc:
             log(f"  Section trim unavailable ({exc}) — downloading full video.", "warn")
 
     try:
         with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ret = ydl.download([resolved])
+        if section_timed_out[0]:
+            _log_section_timeout(sections, log)
+            return False
         if ret != 0:
             return False
         # If the >1080p H.264 fallback ran, confirm the final file really is
@@ -890,7 +938,13 @@ def _download_api(
             log("  Could not locate merged output for post-transcode "
                 "verification — check the file manually before importing.", "warn")
         return True
+    except _SectionTimeout:
+        _log_section_timeout(sections, log)
+        return False
     except Exception as exc:
+        if section_timed_out[0]:
+            _log_section_timeout(sections, log)
+            return False
         log(f"  yt-dlp API error: {exc}", "error")
         return False
     finally:
