@@ -829,14 +829,17 @@ def _download_api(
                 f"H.264 ({encoder}) for Premiere compatibility (this takes longer)…",
                 "info")
             _merge_state["transcoded"] = True
-            # Serialize heavy video encodes across all download threads —
-            # concurrent 4K libx264 encodes can OOM the machine. Blocks here
-            # until any in-flight transcode from another thread finishes.
-            if not _TRANSCODE_GATE.acquire(blocking=False):
-                log("  Waiting for another transcode to finish "
-                    "(one heavy encode at a time)…", "info")
-                _TRANSCODE_GATE.acquire()
-            _merge_state["holding_gate"] = True
+            # Serialize heavy video encodes across all download threads — but
+            # only the RAM-hungry libx264 path (concurrent 4K software encodes
+            # ≈ 6GB+ and can OOM the machine). NVENC buffers on the GPU, so
+            # concurrent NVENC encodes are cheap on system RAM — don't gate
+            # them, or a 4K batch needlessly encodes one-at-a-time.
+            if _h264_transcode_args() is _H264_TRANSCODE_ARGS:
+                if not _TRANSCODE_GATE.acquire(blocking=False):
+                    log("  Waiting for another transcode to finish "
+                        "(one heavy encode at a time)…", "info")
+                    _TRANSCODE_GATE.acquire()
+                _merge_state["holding_gate"] = True
         ydl_opts["postprocessor_args"]["merger"] = _merge_args(vcodec, acodec)
 
     ydl_opts: dict = {
