@@ -182,18 +182,27 @@ class TestDownloadApiOptions(unittest.TestCase):
         merger_args = self._run_hook(opts, "avc1.640028", "opus")
         self.assertEqual(merger_args, ytdlp_skill.PREMIERE_MERGE_ARGS)
 
-    def test_merge_hook_transcodes_video_only_for_vp9_plus_aac(self):
-        # >1080p source with AAC audio already — video needs the H.264
-        # fallback for Premiere compatibility, audio can still be copied.
+    def test_merge_hook_copies_vp9_by_default(self):
+        # Default (TRANSCODE_TO_H264 off, Premiere 2023+): >1080p VP9 passes
+        # through untouched — no re-encode, no generation loss.
         opts = self._captured_opts(audio_only=False)
         merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
+        self.assertEqual(merger_args, ["-c:v", "copy", "-movflags", "+faststart"])
+
+    def test_merge_hook_transcodes_video_only_for_vp9_plus_aac(self):
+        # With the flag on (pre-2023 Premiere): video needs the H.264
+        # fallback, audio is already AAC so it can still be copied.
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", True):
+            opts = self._captured_opts(audio_only=False)
+            merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
         self.assertEqual(
             merger_args, [*ytdlp_skill._H264_TRANSCODE_ARGS, "-movflags", "+faststart"]
         )
 
     def test_merge_hook_transcodes_both_for_av1_plus_opus(self):
-        opts = self._captured_opts(audio_only=False)
-        merger_args = self._run_hook(opts, "av01.0.05M.08", "opus")
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", True):
+            opts = self._captured_opts(audio_only=False)
+            merger_args = self._run_hook(opts, "av01.0.05M.08", "opus")
         self.assertEqual(
             merger_args,
             [*ytdlp_skill._H264_TRANSCODE_ARGS, "-c:a", "aac", "-b:a", "192k",
@@ -215,7 +224,8 @@ class TestDownloadApiOptions(unittest.TestCase):
             {"acodec": "none", "vcodec": "vp9"},
             {"acodec": "mp4a.40.2", "vcodec": "none"},
         ]}
-        hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", True):
+            hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
         self.assertTrue(ytdlp_skill._TRANSCODE_GATE.locked())
         hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
         self.assertFalse(ytdlp_skill._TRANSCODE_GATE.locked())
@@ -315,6 +325,30 @@ class TestParseSections(unittest.TestCase):
         from ytdlp_skill import parse_sections
         for bad in ("", None, "bad", "20:00-10:00", "5-5", "nope-nope"):
             self.assertIsNone(parse_sections(bad), bad)
+
+
+class TestMergeArgs(unittest.TestCase):
+    """The merge step must never re-encode video unless TRANSCODE_TO_H264 is
+    on, and must never re-encode AAC→AAC."""
+
+    def test_h264_source_always_copies(self):
+        for flag in (False, True):
+            with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", flag):
+                args = ytdlp_skill._merge_args("avc1.640028", "mp4a.40.2")
+                self.assertEqual(args, ["-c:v", "copy", "-movflags", "+faststart"])
+
+    def test_vp9_copies_when_transcode_off(self):
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", False):
+            args = ytdlp_skill._merge_args("vp09.00.50.08", "opus")
+            self.assertEqual(args[:2], ["-c:v", "copy"])
+            self.assertIn("aac", args)  # opus still gets a Premiere-safe track
+
+    def test_vp9_transcodes_when_flag_on(self):
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", True), \
+             mock.patch.object(ytdlp_skill, "_h264_transcode_args",
+                               return_value=["-c:v", "libx264"]):
+            args = ytdlp_skill._merge_args("av01.0.12M.08", "opus")
+            self.assertEqual(args[:2], ["-c:v", "libx264"])
 
 
 if __name__ == "__main__":

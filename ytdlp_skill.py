@@ -140,6 +140,14 @@ PREMIERE_MERGE_ARGS_COPY_AUDIO = [
     "-movflags", "+faststart",
 ]
 
+# Premiere 2023+ decodes VP9 and AV1 natively, so a >1080p source can be
+# muxed through untouched: the merge becomes a pure stream copy (seconds
+# instead of minutes) *and* the output is bit-identical to what YouTube
+# served — no H.264 generation loss. Flip to True only if the footage has to
+# open in a pre-2023 Premiere, which needs the transcode below.
+# ponytail: module-level switch, not a UI setting — one editor, one machine.
+TRANSCODE_TO_H264 = False
+
 # H.264 encode used to transcode a >1080p VP9/AV1 source down to something
 # every Premiere Pro version can decode. -crf 16 -preset slow aims for
 # visually-lossless output (close to the high-bitrate VP9/AV1 source) at the
@@ -244,8 +252,9 @@ _H264_VCODEC_PREFIXES = ("avc1", "h264")
 def _merge_args(vcodec: str, acodec: str) -> "list[str]":
     """Pick ffmpeg merge args based on the codecs yt-dlp actually selected."""
     video_args = (
-        ["-c:v", "copy"] if vcodec.lower().startswith(_H264_VCODEC_PREFIXES)
-        else _h264_transcode_args()
+        _h264_transcode_args()
+        if TRANSCODE_TO_H264 and not vcodec.lower().startswith(_H264_VCODEC_PREFIXES)
+        else ["-c:v", "copy"]
     )
     audio_args = (
         [] if acodec.lower().startswith(_AAC_ACODEC_PREFIXES)
@@ -823,7 +832,11 @@ def _download_api(
         audio_fmt = next((f for f in formats if f.get("acodec") not in (None, "none")), None)
         vcodec = ((video_fmt or {}).get("vcodec") or "").lower()
         acodec = ((audio_fmt or {}).get("acodec") or "").lower()
-        if not vcodec.startswith(_H264_VCODEC_PREFIXES):
+        if not vcodec.startswith(_H264_VCODEC_PREFIXES) and not TRANSCODE_TO_H264:
+            log(f"  Keeping {vcodec or 'source'} video untouched (stream copy) — "
+                f"Premiere 2023+ decodes it natively. Set TRANSCODE_TO_H264=True "
+                f"for older Premiere.", "info")
+        if not vcodec.startswith(_H264_VCODEC_PREFIXES) and TRANSCODE_TO_H264:
             encoder = _h264_transcode_args()[1]
             log(f"  >1080p source is {vcodec or 'non-H.264'} — transcoding to "
                 f"H.264 ({encoder}) for Premiere compatibility (this takes longer)…",
@@ -846,7 +859,13 @@ def _download_api(
         "format":                        fmt,
         "outtmpl":                       str(outtmpl),
         "noplaylist":                    not playlist,
-        "merge_output_format":           "opus" if audio_only else "mp4",
+        # "mp4/mkv" = mp4 when the selected codecs are actually mp4-legal,
+        # mkv otherwise. Matters now that VP9/AV1 can pass through untouched
+        # (TRANSCODE_TO_H264): AV1 is standard in mp4, but VP9-in-mp4 is a
+        # container yt-dlp rejects and Premiere reads unreliably — those land
+        # in mkv, which Premiere 2023+ opens fine. Forcing "mp4" here would
+        # produce a file that muxes but may not import.
+        "merge_output_format":           "opus" if audio_only else "mp4/mkv",
         "overwrites":                    force,
         "addmetadata":                   True,
         "writethumbnail":                True,
