@@ -860,12 +860,17 @@ def _download_api(
         "outtmpl":                       str(outtmpl),
         "noplaylist":                    not playlist,
         # "mp4/mkv" = mp4 when the selected codecs are actually mp4-legal,
-        # mkv otherwise. Matters now that VP9/AV1 can pass through untouched
-        # (TRANSCODE_TO_H264): AV1 is standard in mp4, but VP9-in-mp4 is a
-        # container yt-dlp rejects and Premiere reads unreliably — those land
-        # in mkv, which Premiere 2023+ opens fine. Forcing "mp4" here would
-        # produce a file that muxes but may not import.
-        "merge_output_format":           "opus" if audio_only else "mp4/mkv",
+        # mkv otherwise. Matters when VP9/AV1 pass through untouched: AV1 is
+        # standard in mp4, but VP9-in-mp4 is a container yt-dlp rejects and
+        # Premiere reads unreliably — those land in mkv, which Premiere 2023+
+        # opens fine. When TRANSCODE_TO_H264 is on, the merged video is always
+        # re-encoded to H.264 (mp4-legal), so force "mp4" outright — otherwise
+        # yt-dlp picks the container from the *source* codec before the
+        # transcode decision runs, and a VP9 source still lands in mkv even
+        # after its video stream gets re-encoded to H.264.
+        "merge_output_format":           (
+            "opus" if audio_only else "mp4" if TRANSCODE_TO_H264 else "mp4/mkv"
+        ),
         "overwrites":                    force,
         "addmetadata":                   True,
         "writethumbnail":                True,
