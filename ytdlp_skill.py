@@ -146,7 +146,7 @@ PREMIERE_MERGE_ARGS_COPY_AUDIO = [
 # served — no H.264 generation loss. Flip to True only if the footage has to
 # open in a pre-2023 Premiere, which needs the transcode below.
 # ponytail: module-level switch, not a UI setting — one editor, one machine.
-TRANSCODE_TO_H264 = False
+TRANSCODE_TO_H264 = True
 
 # H.264 encode used to transcode a >1080p VP9/AV1 source down to something
 # every Premiere Pro version can decode. -crf 16 -preset slow aims for
