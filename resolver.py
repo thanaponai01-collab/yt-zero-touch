@@ -240,7 +240,7 @@ def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "st
     def _on_request(req):
         u = req.url
         all_urls.append(u)
-        if _STREAM_RE.search(u) and not any(x in u for x in _IGNORE_STREAM):
+        if _STREAM_RE.search(u) and not any(x in u.lower() for x in _IGNORE_STREAM):
             captured.append(u)
 
     def _on_response(resp):
@@ -256,7 +256,7 @@ def _intercept(browser, url: str, cookie_file: "Path | None", log: LogFn) -> "st
         if not body or len(body) > _MAX_SCAN_BYTES:
             return
         for m in _STREAM_RE.findall(body):
-            if not any(x in m for x in _IGNORE_STREAM):
+            if not any(x in m.lower() for x in _IGNORE_STREAM):
                 captured.append(m)
 
     page.on("request", _on_request)
