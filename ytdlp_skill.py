@@ -892,11 +892,22 @@ def _download_api(
             "postprocessor_args": {"merger": PREMIERE_MERGE_ARGS},
             "postprocessor_hooks": [_tune_merge_args_for_premiere],
         } if not audio_only else {}),
-        # Rank by resolution first, then prefer H.264 *within* a resolution —
+        # "lang" first, then resolution, then prefer H.264 *within* a resolution —
         # keeps ≤1080p output H.264 (Premiere-native) while letting 1440p/4K
         # actually pick the higher-res VP9/AV1 stream instead of being capped
         # at a 1080p avc1 match (see FORMAT_VIDEO / QUALITY_PRESETS above).
-        "format_sort":                   ["res", "fps", "vcodec:h264", "channels", "abr"],
+        #
+        # "lang" is load-bearing on multi-audio videos (YouTube auto-dubs).
+        # yt-dlp *prepends* these fields to its own defaults rather than
+        # replacing them, so without it the effective order ends up
+        # "... channels, abr, lang, ...": for two audio-only tracks res/fps/
+        # vcodec are all null and channels usually ties at 2, leaving "abr" to
+        # decide — and a dub encoded at a higher bitrate than the original
+        # (or in 5.1 against a stereo original) wins before "lang" is ever
+        # consulted. Ranking language first restores yt-dlp's default
+        # behaviour of preferring the track the uploader marked original.
+        # No-op on single-audio videos.
+        "format_sort":                   ["lang", "res", "fps", "vcodec:h264", "channels", "abr"],
         "socket_timeout":                60,
         "concurrent_fragment_downloads": 8,
         "http_chunk_size":               10485760,

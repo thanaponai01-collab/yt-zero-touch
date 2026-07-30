@@ -149,10 +149,27 @@ class TestDownloadApiOptions(unittest.TestCase):
         self.assertEqual(opts["concurrent_fragment_downloads"], 8)
         self.assertEqual(opts["http_chunk_size"], 10485760)
         self.assertEqual(
-            opts["format_sort"], ["res", "fps", "vcodec:h264", "channels", "abr"]
+            opts["format_sort"], ["lang", "res", "fps", "vcodec:h264", "channels", "abr"]
         )
         self.assertEqual(opts["postprocessor_args"]["merger"], ytdlp_skill.PREMIERE_MERGE_ARGS)
         self.assertEqual(len(opts["postprocessor_hooks"]), 1)
+
+    def test_format_sort_ranks_language_above_bitrate(self):
+        """Regression: multi-audio videos (YouTube auto-dubs) must keep the
+        uploader's original track. yt-dlp prepends these fields to its own
+        defaults, so any field ahead of "lang" can decide between two audio
+        tracks before language is consulted — a dub encoded at a higher abr
+        (or in 5.1 against a stereo original) would then win."""
+        for audio_only in (False, True):
+            with self.subTest(audio_only=audio_only):
+                sort = self._captured_opts(audio_only=audio_only)["format_sort"]
+                self.assertIn("lang", sort)
+                for tiebreaker in ("abr", "channels", "asr", "br", "size"):
+                    if tiebreaker in sort:
+                        self.assertLess(
+                            sort.index("lang"), sort.index(tiebreaker),
+                            f"{tiebreaker!r} outranks 'lang' — a dub can beat the original",
+                        )
 
     def test_audio_only_skips_merger_args(self):
         opts = self._captured_opts(audio_only=True)
