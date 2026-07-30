@@ -199,12 +199,20 @@ class TestDownloadApiOptions(unittest.TestCase):
         merger_args = self._run_hook(opts, "avc1.640028", "opus")
         self.assertEqual(merger_args, ytdlp_skill.PREMIERE_MERGE_ARGS)
 
-    def test_merge_hook_copies_vp9_by_default(self):
-        # Default (TRANSCODE_TO_H264 off, Premiere 2023+): >1080p VP9 passes
-        # through untouched — no re-encode, no generation loss.
-        opts = self._captured_opts(audio_only=False)
-        merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
-        self.assertEqual(merger_args, ["-c:v", "copy", "-movflags", "+faststart"])
+    def test_transcode_to_h264_is_on_by_default(self):
+        # The single place the shipped default is asserted. Both merge-path
+        # tests below patch TRANSCODE_TO_H264 explicitly rather than leaning
+        # on the module value, so flipping this flag breaks exactly one test
+        # (this one) instead of silently invalidating a path test's premise.
+        self.assertTrue(ytdlp_skill.TRANSCODE_TO_H264)
+
+    def test_merge_hook_copies_vp9_when_transcode_disabled(self):
+        # Flag off (Premiere 2023+ decodes VP9/AV1 natively): >1080p VP9
+        # passes through untouched — no re-encode, no generation loss.
+        with mock.patch.object(ytdlp_skill, "TRANSCODE_TO_H264", False):
+            opts = self._captured_opts(audio_only=False)
+            merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
+        self.assertEqual(merger_args, ytdlp_skill.PREMIERE_MERGE_ARGS_COPY_AUDIO)
 
     def test_merge_hook_transcodes_video_only_for_vp9_plus_aac(self):
         # With the flag on (pre-2023 Premiere): video needs the H.264
