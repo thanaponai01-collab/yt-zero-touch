@@ -164,7 +164,7 @@ class TestMergeSessionGate(GateFreeAfterTest, unittest.TestCase):
     def setUp(self):
         self.messages = []
         self.session = transcode_plan.merge_session(
-            lambda msg, tag="info": self.messages.append(msg))
+            lambda msg, tag="info": self.messages.append(msg), container="mp4")
 
     def _plan(self, needs_gate):
         return transcode_plan.TranscodePlan(

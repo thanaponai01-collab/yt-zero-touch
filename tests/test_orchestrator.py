@@ -97,6 +97,18 @@ class TestClassifyFailure(unittest.TestCase):
         self.assertIsNone(classify_failure(["Connection reset by peer, retrying"]))
         self.assertIsNone(classify_failure([]))
 
+    def test_failed_output_verification_is_permanent(self):
+        # Our own check, not the source's. Unclassified would mean transient,
+        # and a 4K source would pay for four full 16-minute encodes to reach
+        # the same verdict. Text must stay in step with transcode_plan's.
+        fc = classify_failure([
+            "  Output verification FAILED (codec=vp9, expected h264) — clip.mp4 "
+            "is corrupt or was never transcoded. Marking this download failed."
+        ])
+        self.assertEqual(fc.reason, "output_unverified")
+        self.assertTrue(fc.permanent)
+        self.assertIn("disk space", fc.remedy)
+
 
 class TestDownloadWithRetry(unittest.TestCase):
     def test_success_returns_truthy_outcome(self):
