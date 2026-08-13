@@ -317,6 +317,15 @@ class TestVerifyH264Output(unittest.TestCase):
                 transcode_plan.verify_h264_output("out.mp4", lambda *a, **k: None)
             )
 
+    def test_passes_when_ffprobe_appends_a_trailing_csv_comma(self):
+        # ffprobe's csv writer appends a trailing empty field (e.g. "h264,")
+        # for streams carrying side_data, such as HDR content-light-level
+        # metadata — a formatting quirk, not evidence the codec is wrong.
+        with self._fake_run(0, "h264,\n"):
+            self.assertTrue(
+                transcode_plan.verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

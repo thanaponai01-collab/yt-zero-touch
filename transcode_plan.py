@@ -470,7 +470,11 @@ def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
     except Exception as exc:
         log(f"  Output verification errored ({exc}) — treating as failed.", "error")
         return False
-    codec = (proc.stdout or "").strip().splitlines()[0] if proc.stdout else ""
+    # ffprobe's csv writer appends a trailing empty field (e.g. "h264,") for
+    # streams carrying side_data (HDR content-light-level metadata does this)
+    # even though only codec_name was requested — take the first CSV field.
+    line = (proc.stdout or "").strip().splitlines()[0] if proc.stdout else ""
+    codec = line.split(",")[0]
     if proc.returncode == 0 and codec == "h264":
         log("  Verified: output is clean H.264 — safe for any Premiere version.", "info")
         return True
