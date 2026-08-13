@@ -238,6 +238,11 @@ class TestDownloadApiOptions(DownloadApiHarness):
         opts = self._captured_opts(audio_only=False)
         self.assertEqual(opts["concurrent_fragment_downloads"], 8)
         self.assertEqual(opts["http_chunk_size"], 10485760)
+        # `retries` is a whole-file budget of truncated reads, so it is sized
+        # for a multi-GB download rather than left at yt-dlp's default; the
+        # throttle limit is the re-extraction escape hatch retries can't give.
+        self.assertEqual(opts["retries"], 50)
+        self.assertEqual(opts["throttledratelimit"], 102400)
         # Ordering/scenario coverage for format_sort itself lives in
         # test_format_policy.py — this only checks the wiring didn't drift.
         self.assertIs(opts["format_sort"], format_policy.FORMAT_SORT)

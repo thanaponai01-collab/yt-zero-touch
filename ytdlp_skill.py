@@ -731,7 +731,27 @@ def _download_api(
         "socket_timeout":                60,
         "concurrent_fragment_downloads": 8,
         "http_chunk_size":               10485760,
-        "retries":                       10,
+        # ponytail: `retries` is a whole-file budget, not a per-chunk one —
+        # http.py wraps the entire download in one RetryManager whose attempt
+        # counter never resets on success, and chunk boundaries are refunded
+        # (`retry.attempt -= 1` on NextFragment). So this is the number of
+        # truncated reads ("N bytes read, M more expected") a file may suffer
+        # over its whole length before yt-dlp abandons it. 10 is a Premiere
+        # source file's worth of nothing: a 1 GB video off a flaky YouTube CDN
+        # edge burns that in the last third and throws away the first two.
+        # Resume is byte-accurate, so a spent retry costs a reconnect, not
+        # progress — hence a budget sized for a long download, not a short one.
+        "retries":                       50,
+        # The escape hatch retries can't provide. Retrying re-requests the
+        # *same* URL, so an edge that has gone bad stays bad for all 50; this
+        # aborts and re-extracts instead, usually landing on a different edge
+        # (ThrottledDownload is a ReExtractInfo) and starting a fresh retry
+        # budget with it. Deliberately far below any workable speed: it must
+        # only fire on a dead edge, never on a merely slow one, or a download
+        # that would have finished thrashes on re-extraction instead.
+        "throttledratelimit":            102400,   # 100 KiB/s, held for 3s
+        # Unrelated to the above: fragmented (DASH/HLS) downloads retry
+        # per-fragment, so this budget really is per-fragment and 10 is fine.
         "fragment_retries":              10,
         # ponytail: no player_client override — yt-dlp's built-in default
         # (tv_simply/android_vr became erratic and now often serve only
