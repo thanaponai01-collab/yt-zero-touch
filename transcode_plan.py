@@ -13,6 +13,10 @@ runs, once the real codecs are known:
 
     container_for(audio_only)        -> call early, building ydl_opts
     plan_transcode(vcodec, acodec)   -> call late, once codecs are known
+
+Applying that decision is a lifecycle, not a call, because yt-dlp reports the
+merge starting and finishing through separate callbacks and only promises the
+second one on success. `merge_session()` owns that lifecycle for one download.
 """
 
 from __future__ import annotations
@@ -230,7 +234,7 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     )
 
 # ---------------------------------------------------------------------------
-# Gate — only one heavy H.264 video transcode may run at a time, process-wide
+# Merge session — owns one download's merge lifecycle
 # ---------------------------------------------------------------------------
 
 # The orchestrator runs up to 3 download threads; if several of them hit the
@@ -240,22 +244,90 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
 # run in parallel — only the ffmpeg merge/transcode step is serialized, and
 # only when it actually transcodes video (pure stream copies don't take the
 # gate).
+#
+# Private to this file on purpose: only the merge session below may touch it.
+# There is no acquire/release pair to call from outside, because a caller that
+# can acquire is a caller that can forget to release.
 _TRANSCODE_GATE = threading.Lock()
 
 
-def acquire_gate(log: LogFn) -> None:
-    """Acquire the process-wide transcode gate, logging if this call has to
-    wait behind another in-flight transcode. Always blocks until acquired —
-    there is no non-blocking "give up" path."""
-    if _TRANSCODE_GATE.acquire(blocking=False):
-        return
-    log("  Waiting for another transcode to finish (one heavy encode at a time)…",
-        "info")
-    _TRANSCODE_GATE.acquire()
+class _MergeSession:
+    """Owns the merge lifecycle for one download: the transcode gate, and
+    where the merged file landed.
+
+    Scoped to the *download*, not to one merge, because the gate has to be
+    held across two separate yt-dlp callbacks — `started` returns before
+    ffmpeg runs and `finished` arrives after it, so no single `with` block can
+    bracket one merge. The pairing moves in here instead of dissolving.
+
+    Ordering contract, as yt-dlp speaks it:
+
+        merge_started(plan, filepath)   <- "started" callback, before ffmpeg
+        merge_finished(filepath)        <- "finished" callback, after ffmpeg
+        __exit__                        <- the enclosing download ended
+
+    yt-dlp promises `finished` only when the merge *succeeds*: its hook
+    wrapper emits it on the statement after the merge call, with no
+    try/finally (postprocessor/common.py). A crashed merge therefore skips it,
+    so the gate is freed on two independent paths — see merge_started and
+    __exit__.
+    """
+
+    def __init__(self, log: LogFn):
+        self._log = log
+        self._holding_gate = False
+        # Whether a video transcode ran, and where the merged file landed —
+        # read by the caller after the download to decide on verification.
+        self.transcoded = False
+        self.filepath: "str | None" = None
+
+    def __enter__(self) -> "_MergeSession":
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        self._free_gate()
+        return False
+
+    def merge_started(self, plan: "TranscodePlan", filepath: "str | None") -> None:
+        """A merge is about to run with `plan`'s args, producing `filepath`."""
+        # Still holding the gate from a previous merge means that merge died
+        # without reporting back. Free it rather than blocking: this is the
+        # same thread, and the gate is not reentrant, so blocking here is an
+        # unbreakable self-deadlock. It is reachable whenever one
+        # ydl.download() call serves several entries — i.e. any playlist,
+        # since ignoreerrors lets it carry on past a failed merge.
+        if self._holding_gate:
+            self._log("  Previous merge ended without reporting back — freeing "
+                      "the transcode gate for this one.", "warn")
+            self._free_gate()
+        self.transcoded = plan.did_transcode
+        self.filepath = filepath
+        if plan.needs_gate:
+            self._take_gate()
+
+    def merge_finished(self, filepath: "str | None") -> None:
+        """The merge completed and ffmpeg has renamed its output into place."""
+        if filepath:
+            self.filepath = filepath
+        self._free_gate()
+
+    def _take_gate(self) -> None:
+        if not _TRANSCODE_GATE.acquire(blocking=False):
+            self._log("  Waiting for another transcode to finish (one heavy "
+                      "encode at a time)…", "info")
+            _TRANSCODE_GATE.acquire()
+        self._holding_gate = True
+
+    def _free_gate(self) -> None:
+        if self._holding_gate:
+            self._holding_gate = False
+            _TRANSCODE_GATE.release()
 
 
-def release_gate() -> None:
-    _TRANSCODE_GATE.release()
+def merge_session(log: LogFn) -> _MergeSession:
+    """Open a merge session for one download. Use as a context manager around
+    the yt-dlp download call, and feed it the merger's callbacks."""
+    return _MergeSession(log)
 
 # ---------------------------------------------------------------------------
 # Post-transcode verification

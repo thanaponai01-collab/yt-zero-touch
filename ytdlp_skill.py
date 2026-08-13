@@ -114,7 +114,7 @@ QUALITY_PRESETS: dict[str, str] = {
 # Merge-step / transcode decision (copy vs. re-encode to H.264, container,
 # gate, verification) is owned by transcode_plan.py — see that module for
 # PREMIERE_MERGE_ARGS, TRANSCODE_TO_H264, plan_transcode(), container_for(),
-# acquire_gate()/release_gate(), verify_h264_output().
+# merge_session(), verify_h264_output().
 
 # ---------------------------------------------------------------------------
 # Internal constants
@@ -652,37 +652,32 @@ def _download_api(
             {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
         )
 
-    # Per-download state shared between the merger hook and the post-download
-    # verification below: whether a video transcode happened, whether this
-    # thread currently holds the global transcode gate, and where the merged
-    # file ended up.
-    _merge_state = {"transcoded": False, "holding_gate": False, "filepath": None}
+    # Owns the merge lifecycle for this download — the transcode gate and
+    # where the merged file landed. Entered around the download call below, so
+    # the gate is freed however that call ends.
+    merge = transcode_plan.merge_session(log)
 
     def _tune_merge_args_for_premiere(status: dict):
-        """Adapter: ask transcode_plan for the merge decision once the real
-        codecs are known, apply it to ydl_opts, and manage the process-wide
-        transcode gate around it.
+        """Adapter: pull the real codecs out of yt-dlp's callback payload, ask
+        transcode_plan for the merge decision, apply it to ydl_opts, and hand
+        the merge's start/finish to the session.
 
         Registered as a "postprocessor_hooks" callback, which yt-dlp calls
         synchronously *before* the merger builds its ffmpeg command — so
         mutating ydl_opts["postprocessor_args"] here (same dict object the
-        merger reads its args from) takes effect in time. If this never
-        fires (e.g. no merge was needed), the unconditional PREMIERE_MERGE_ARGS
-        default set below stays in effect.
+        merger reads its args from) takes effect in time. If this never fires
+        (e.g. no merge was needed), the unconditional default set below stays
+        in effect.
         """
         if status.get("postprocessor") != "Merger":
             return
+        info = status.get("info_dict") or {}
         if status.get("status") == "finished":
-            # Remember where the merged file landed so we can ffprobe-verify
-            # it after the download, then let the next queued transcode run.
-            _merge_state["filepath"] = (status.get("info_dict") or {}).get("filepath")
-            if _merge_state["holding_gate"]:
-                _merge_state["holding_gate"] = False
-                transcode_plan.release_gate()
+            merge.merge_finished(info.get("filepath"))
             return
         if status.get("status") != "started":
             return
-        formats = (status.get("info_dict") or {}).get("requested_formats") or []
+        formats = info.get("requested_formats") or []
         video_fmt = next((f for f in formats if f.get("vcodec") not in (None, "none")), None)
         audio_fmt = next((f for f in formats if f.get("acodec") not in (None, "none")), None)
         vcodec = ((video_fmt or {}).get("vcodec") or "").lower()
@@ -690,10 +685,10 @@ def _download_api(
         plan = transcode_plan.plan_transcode(vcodec, acodec)
         if plan.log_message:
             log(plan.log_message, plan.log_level)
-        _merge_state["transcoded"] = plan.did_transcode
-        if plan.needs_gate:
-            transcode_plan.acquire_gate(log)
-            _merge_state["holding_gate"] = True
+        # The merger reads info["filepath"] as its output path before it runs
+        # (FFmpegMergerPP.run), so the final path is already known here — and
+        # unlike the "finished" payload, it survives a crashed merge.
+        merge.merge_started(plan, info.get("filepath"))
         ydl_opts["postprocessor_args"]["merger"] = plan.merge_args
 
     ydl_opts: dict = {
@@ -781,8 +776,14 @@ def _download_api(
             log(f"  Section trim unavailable ({exc}) — downloading full video.", "warn")
 
     try:
-        with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ret = ydl.download([resolved])
+        # Second of the session's two release paths: whatever the download
+        # does — return, raise, or abort — leaving this scope frees the gate.
+        # The first path is inside merge_started, and it is the one that
+        # covers a playlist, where this scope isn't left until every entry is
+        # done.
+        with merge:
+            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ret = ydl.download([resolved])
         if section_timed_out[0]:
             _log_section_timeout(sections, log)
             return False
@@ -791,8 +792,8 @@ def _download_api(
         # If the >1080p H.264 fallback ran, confirm the final file really is
         # decodable H.264 before declaring success — "rare 4K, but when it
         # happens it must work".
-        if _merge_state["transcoded"]:
-            merged = _merge_state["filepath"]
+        if merge.transcoded:
+            merged = merge.filepath
             if merged and Path(merged).exists():
                 return transcode_plan.verify_h264_output(merged, log)
             log("  Could not locate merged output for post-transcode "
@@ -807,13 +808,6 @@ def _download_api(
             return False
         log(f"  yt-dlp API error: {exc}", "error")
         return False
-    finally:
-        # Safety net: if the merger crashed between "started" and "finished",
-        # the hook never released the transcode gate — release it here so a
-        # failed encode can't deadlock every later >1080p download.
-        if _merge_state["holding_gate"]:
-            _merge_state["holding_gate"] = False
-            transcode_plan.release_gate()
 
 
 # ---------------------------------------------------------------------------
