@@ -240,7 +240,7 @@ class TestDownloadApiOptions(DownloadApiHarness):
         # Ordering/scenario coverage for format_sort itself lives in
         # test_format_policy.py — this only checks the wiring didn't drift.
         self.assertIs(opts["format_sort"], format_policy.FORMAT_SORT)
-        self.assertEqual(opts["postprocessor_args"]["merger"], transcode_plan.PREMIERE_MERGE_ARGS)
+        self.assertEqual(opts["postprocessor_args"]["merger"], transcode_plan.PRE_MERGE_DEFAULT_ARGS)
         self.assertEqual(len(opts["postprocessor_hooks"]), 1)
 
     def test_audio_only_skips_merger_args(self):
@@ -251,7 +251,7 @@ class TestDownloadApiOptions(DownloadApiHarness):
     def test_merge_hook_ignores_other_postprocessors(self):
         run = self.run_download(events=[("Metadata", "started", {})])
         self.assertEqual(
-            run.opts["postprocessor_args"]["merger"], transcode_plan.PREMIERE_MERGE_ARGS
+            run.opts["postprocessor_args"]["merger"], transcode_plan.PRE_MERGE_DEFAULT_ARGS
         )
         self.assertTrue(run.ok)
 

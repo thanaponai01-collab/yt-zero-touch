@@ -113,8 +113,8 @@ QUALITY_PRESETS: dict[str, str] = {
 
 # Merge-step / transcode decision (copy vs. re-encode to H.264, container,
 # gate, verification) is owned by transcode_plan.py — see that module for
-# PREMIERE_MERGE_ARGS, TRANSCODE_TO_H264, plan_transcode(), container_for(),
-# merge_session(), verify_h264_output().
+# PRE_MERGE_DEFAULT_ARGS, TRANSCODE_TO_H264, plan_transcode(),
+# container_for(), merge_session(), verify_h264_output().
 
 # ---------------------------------------------------------------------------
 # Internal constants
@@ -715,13 +715,13 @@ def _download_api(
         "progress_hooks":                [_progress] + ([extra_progress_hook] if extra_progress_hook else []),
         "postprocessors":                postprocessors,
         # Merge step tuned for guaranteed-safe Premiere playback. Defaults to
-        # the maximal transcode variant; _tune_merge_args_for_premiere swaps
-        # in the cheaper copy/transcode combination that actually matches the
-        # selected video/audio codecs once they're known (see
-        # transcode_plan.plan_transcode). Skipped for audio-only downloads
-        # (no video/audio merge happens there).
+        # a stream copy, because nothing is known about the codecs yet;
+        # _tune_merge_args_for_premiere replaces it with the combination that
+        # actually matches the selected video/audio codecs once they're known
+        # (see transcode_plan.plan_transcode). Skipped for audio-only
+        # downloads (no video/audio merge happens there).
         **({
-            "postprocessor_args": {"merger": transcode_plan.PREMIERE_MERGE_ARGS},
+            "postprocessor_args": {"merger": transcode_plan.PRE_MERGE_DEFAULT_ARGS},
             "postprocessor_hooks": [_tune_merge_args_for_premiere],
         } if not audio_only else {}),
         # format_sort policy: three independent concerns composed into one

@@ -70,7 +70,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
             with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", flag):
                 plan = transcode_plan.plan_transcode("avc1.640028", "mp4a.40.2")
                 self.assertEqual(plan.merge_args, ["-c:v", "copy", "-movflags", "+faststart"])
-                self.assertFalse(plan.did_transcode)
+                self.assertEqual(plan.codec_case, "h264")
                 self.assertFalse(plan.needs_gate)
 
     def test_vp9_copies_when_transcode_off(self):
@@ -78,7 +78,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
             plan = transcode_plan.plan_transcode("vp09.00.50.08", "opus")
             self.assertEqual(plan.merge_args[:2], ["-c:v", "copy"])
             self.assertIn("aac", plan.merge_args)  # opus still gets a Premiere-safe track
-            self.assertFalse(plan.did_transcode)
+            self.assertEqual(plan.codec_case, "non_h264")
             self.assertFalse(plan.needs_gate)
 
     def test_vp9_transcodes_when_flag_on(self):
@@ -87,7 +87,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
                                return_value=(["-c:v", "libx264"], "libx264")):
             plan = transcode_plan.plan_transcode("av01.0.12M.08", "opus")
             self.assertEqual(plan.merge_args[:2], ["-c:v", "libx264"])
-            self.assertTrue(plan.did_transcode)
+            self.assertEqual(plan.codec_case, "non_h264")
 
     def test_merge_full_copy_for_h264_plus_aac(self):
         plan = transcode_plan.plan_transcode("avc1.640028", "mp4a.40.2")
@@ -95,7 +95,9 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
 
     def test_merge_transcodes_audio_only_for_h264_plus_opus(self):
         plan = transcode_plan.plan_transcode("avc1.640028", "opus")
-        self.assertEqual(plan.merge_args, transcode_plan.PREMIERE_MERGE_ARGS)
+        self.assertEqual(plan.merge_args,
+                         ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                          "-movflags", "+faststart"])
 
     def test_merge_copies_vp9_when_transcode_disabled(self):
         # Flag off (Premiere 2023+ decodes VP9/AV1 natively): >1080p VP9
@@ -131,7 +133,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
         transcode_plan._h264_encoder_cache = (transcode_plan._H264_NVENC_ARGS, "nvenc")
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
             plan = transcode_plan.plan_transcode("vp9", "mp4a.40.2")
-        self.assertTrue(plan.did_transcode)
+        self.assertEqual(plan.merge_args[:2], ["-c:v", "h264_nvenc"])
         self.assertFalse(plan.needs_gate)
 
     def test_no_gate_for_stream_copy(self):
@@ -149,6 +151,33 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
             plan = transcode_plan.plan_transcode("vp9", "mp4a.40.2")
         self.assertIsNotNone(plan.log_message)
         self.assertIn("transcoding", plan.log_message)
+
+    def test_unreadable_codec_transcodes_and_says_so(self):
+        # yt-dlp is tracked on nightly, so the callback payload this reads can
+        # change shape without a release and hand us an empty codec. The old
+        # prefix test called that "not H.264" and logged it as fact, which
+        # meant a 16-minute encode explained by a guess.
+        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
+            plan = transcode_plan.plan_transcode("", "opus")
+        self.assertEqual(plan.codec_case, "unknown")
+        self.assertEqual(plan.merge_args[:2], ["-c:v", "libx264"])
+        self.assertEqual(plan.log_level, "warn")
+        self.assertIn("Could not determine", plan.log_message)
+        self.assertNotIn("non-H.264", plan.log_message)
+
+    def test_unrecognised_codec_is_not_unknown(self):
+        # A codec we've never heard of is still a codec we can name. Only an
+        # absent one is undeterminable.
+        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
+            plan = transcode_plan.plan_transcode("vvc1.1.L51", "opus")
+        self.assertEqual(plan.codec_case, "non_h264")
+        self.assertEqual(plan.log_level, "info")
+        self.assertIn("vvc1.1.l51", plan.log_message)   # codecs are normalised
+
+    def test_whitespace_only_codec_is_unknown(self):
+        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
+            self.assertEqual(transcode_plan.plan_transcode("  ", "opus").codec_case,
+                             "unknown")
 
     def test_no_log_message_for_h264_source(self):
         plan = transcode_plan.plan_transcode("avc1.640028", "mp4a.40.2")
@@ -168,7 +197,7 @@ class TestMergeSessionGate(GateFreeAfterTest, unittest.TestCase):
 
     def _plan(self, needs_gate):
         return transcode_plan.TranscodePlan(
-            merge_args=[], did_transcode=needs_gate, needs_gate=needs_gate,
+            merge_args=[], needs_gate=needs_gate, codec_case="non_h264",
             log_message=None,
         )
 
