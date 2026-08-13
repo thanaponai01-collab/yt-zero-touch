@@ -8,6 +8,7 @@ yt-dlp finds nothing.
 """
 
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -103,42 +104,128 @@ class TestGalleryRouting(unittest.TestCase):
         mg.assert_not_called()
 
 
-class TestDownloadApiOptions(unittest.TestCase):
-    """Locks in the format/merge-tuning ydl_opts built by _download_api."""
+class GateFreeAfterTest:
+    """Fails the test that leaked the process-wide transcode gate, by name,
+    then frees it so the rest of the suite still runs.
+
+    Deleting this guard outright would not surface a leak as a failure — the
+    gate is a non-reentrant Lock, so the next test to take it would block
+    forever and the suite would hang with no culprit named."""
+
+    def tearDown(self):
+        super().tearDown()
+        leaked = transcode_plan._TRANSCODE_GATE.locked()
+        if leaked:
+            transcode_plan._TRANSCODE_GATE.release()
+        self.assertFalse(leaked, "test leaked the process-wide transcode gate")
+
+
+class DownloadApiHarness(GateFreeAfterTest, unittest.TestCase):
+    """Drives _download_api against a yt-dlp fake that speaks the real
+    postprocessor-hook protocol, so merge-lifecycle scenarios can be written
+    as a script of callbacks rather than by poking the hook directly."""
 
     def setUp(self):
         # Pin the H.264 fallback to libx264 so results don't depend on
         # whether the test machine happens to have a working NVENC GPU.
         self._saved_encoder_cache = transcode_plan._h264_encoder_cache
         transcode_plan._h264_encoder_cache = (transcode_plan._H264_TRANSCODE_ARGS, "libx264")
+        self.tmp = Path(__file__).resolve().parent / "_tmp_download_api"
+        self.tmp.mkdir(exist_ok=True)
 
     def tearDown(self):
+        import shutil
         transcode_plan._h264_encoder_cache = self._saved_encoder_cache
-        # Guard against a test leaving the global transcode gate held.
-        if transcode_plan._TRANSCODE_GATE.locked():
-            transcode_plan._TRANSCODE_GATE.release()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        super().tearDown()
 
-    def _captured_opts(self, audio_only=False):
+    def merged_file(self, name):
+        """A real file on disk, so the exists() check before verification is
+        exercised rather than stubbed."""
+        path = self.tmp / name
+        path.write_bytes(b"not really an mp4")
+        return str(path)
+
+    def merge_event(self, status, vcodec="vp9", acodec="opus", filepath=None):
+        return ("Merger", status, {
+            "filepath": filepath,
+            "requested_formats": [
+                {"vcodec": vcodec, "acodec": "none"},
+                {"vcodec": "none", "acodec": acodec},
+            ],
+        })
+
+    def run_download(self, events=(), retcode=0, raises=None,
+                     audio_only=False, probe_codec="h264"):
+        """Replay `events` through the registered postprocessor hooks during
+        download(), then return `retcode` (or raise `raises`).
+
+        Returns a result carrying only what a caller can observe: whether the
+        attempt succeeded, the captured ydl_opts, the merger args as they
+        stood at each merge, and the files ffprobe was pointed at."""
         captured = {}
+        merger_args_at_merge = []
+        probed = []
+        logged = []
 
         class _FakeYDL:
             def __init__(self, opts):
                 captured.update(opts)
+
             def __enter__(self):
                 return self
+
             def __exit__(self, *a):
                 return False
-            def download(self, urls):
-                return 0
 
-        with mock.patch.object(ytdlp_skill._yt_dlp, "YoutubeDL", _FakeYDL):
-            ytdlp_skill._download_api(
+            def download(self, urls):
+                for pp, status, info in events:
+                    for hook in captured.get("postprocessor_hooks", []):
+                        hook({"postprocessor": pp, "status": status, "info_dict": info})
+                    if pp == "Merger" and status == "started":
+                        # Snapshot now: the production code mutates this dict
+                        # in place, so by the end of a playlist it holds only
+                        # the last entry's args.
+                        merger_args_at_merge.append(
+                            list(captured["postprocessor_args"]["merger"]))
+                if raises is not None:
+                    raise raises
+                return retcode
+
+        def _fake_run(cmd, **kwargs):
+            probed.append(list(cmd))
+            return mock.Mock(returncode=0, stdout=f"{probe_codec}\n")
+
+        with mock.patch.object(ytdlp_skill._yt_dlp, "YoutubeDL", _FakeYDL), \
+             mock.patch.object(transcode_plan.subprocess, "run", _fake_run):
+            ok = ytdlp_skill._download_api(
                 "https://youtube.com/watch?v=abc",
                 Path("out") / "%(title)s.%(ext)s",
                 ytdlp_skill.FORMAT_AUDIO if audio_only else ytdlp_skill.FORMAT_VIDEO,
                 audio_only, False, False, [], None, None,
+                log=lambda msg, tag="info": logged.append((tag, msg)),
             )
-        return captured
+        return _Attempt(ok, captured, merger_args_at_merge, probed, logged)
+
+
+class _Attempt:
+    def __init__(self, ok, opts, merger_args_at_merge, probed, logged):
+        self.ok = ok
+        self.opts = opts
+        self.merger_args_at_merge = merger_args_at_merge
+        self.logged = logged
+        # ffprobe argv is "ffprobe ... <path>", so the target is the last arg.
+        self.verified = [cmd[-1] for cmd in probed]
+
+    def log_text(self):
+        return "\n".join(msg for _, msg in self.logged)
+
+
+class TestDownloadApiOptions(DownloadApiHarness):
+    """Locks in the format/merge-tuning ydl_opts built by _download_api."""
+
+    def _captured_opts(self, audio_only=False):
+        return self.run_download(audio_only=audio_only).opts
 
     def test_no_codec_filters_in_default_format(self):
         self.assertEqual(ytdlp_skill.FORMAT_VIDEO, "bestvideo+bestaudio/best")
@@ -161,35 +248,98 @@ class TestDownloadApiOptions(unittest.TestCase):
         self.assertNotIn("postprocessor_args", opts)
         self.assertNotIn("postprocessor_hooks", opts)
 
-    def test_hook_wires_plan_into_ydl_opts_and_manages_gate(self):
-        # The closure's own job, not transcode_plan's: pull vcodec/acodec out
-        # of yt-dlp's requested_formats shape, apply the resulting merge_args
-        # to ydl_opts, and hold the transcode gate for the lifetime of the
-        # merge. Scenario coverage for the decision itself (copy vs.
-        # transcode, per codec pair) lives in test_transcode_plan.py.
-        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
-            opts = self._captured_opts(audio_only=False)
-            hook = opts["postprocessor_hooks"][0]
-            info_dict = {"requested_formats": [
-                {"acodec": "none", "vcodec": "vp9"},
-                {"acodec": "opus", "vcodec": "none"},
-            ]}
-            hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
-            self.assertTrue(transcode_plan._TRANSCODE_GATE.locked())
-            self.assertEqual(
-                opts["postprocessor_args"]["merger"],
-                transcode_plan.plan_transcode("vp9", "opus").merge_args,
-            )
-            hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
+    def test_merge_hook_ignores_other_postprocessors(self):
+        run = self.run_download(events=[("Metadata", "started", {})])
+        self.assertEqual(
+            run.opts["postprocessor_args"]["merger"], transcode_plan.PREMIERE_MERGE_ARGS
+        )
+        self.assertTrue(run.ok)
+
+
+class TestMergeLifecycle(DownloadApiHarness):
+    """The merge lifecycle as yt-dlp actually drives it — including the
+    sequences where it never reports back.
+
+    yt-dlp only promises the "finished" callback when the merge succeeds. A
+    crashed merge is therefore modelled as: "started" fires, "finished" never
+    does, and download() returns nonzero — faithful, because run_pp catches
+    the merger's PostProcessingError and ignoreerrors turns it into a retcode,
+    so no exception ever reaches the hook."""
+
+    def setUp(self):
+        super().setUp()
+        self._flag = mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True)
+        self._flag.start()
+        self.addCleanup(self._flag.stop)
+
+    def test_merge_that_starts_and_finishes(self):
+        merged = self.merged_file("clip.mp4")
+        run = self.run_download(events=[
+            self.merge_event("started", filepath=merged),
+            self.merge_event("finished", filepath=merged),
+        ])
+        self.assertTrue(run.ok)
+        self.assertEqual(run.merger_args_at_merge,
+                         [transcode_plan.plan_transcode("vp9", "opus").merge_args])
+        self.assertEqual(run.verified, [merged])
+
+    def test_crashed_merge_fails_the_download_and_frees_the_gate(self):
+        # "started" with no "finished" — the gate must not survive the call.
+        run = self.run_download(
+            events=[self.merge_event("started", filepath=self.merged_file("clip.mp4"))],
+            retcode=1,
+        )
+        self.assertFalse(run.ok)
+        self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
+        self.assertEqual(run.verified, [])
+
+    def test_second_merge_does_not_block_on_a_dead_first_one(self):
+        # The shipped hang: one ydl.download() call serves a whole playlist,
+        # so entry 2's merge asks for a non-reentrant gate its own thread
+        # still holds from entry 1's crashed merge. Run it on a thread and
+        # bound the wait, so a regression fails in five seconds instead of
+        # hanging the suite forever.
+        first, second = self.merged_file("one.mp4"), self.merged_file("two.mp4")
+        result = {}
+
+        def _go():
+            result["run"] = self.run_download(events=[
+                self.merge_event("started", filepath=first),    # dies here
+                self.merge_event("started", filepath=second),
+                self.merge_event("finished", filepath=second),
+            ], retcode=1)
+
+        worker = threading.Thread(target=_go, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(),
+                         "second merge deadlocked on the gate held by the first")
+        run = result["run"]
+        self.assertFalse(run.ok)          # entry 1 still failed the retcode
+        self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
+        self.assertEqual(len(run.merger_args_at_merge), 2)
+        self.assertIn("freeing the transcode gate", run.log_text())
+
+    def test_gate_is_freed_when_the_download_call_raises(self):
+        # The session's second release path: ignoreerrors doesn't swallow
+        # everything, and a raise must not strand the gate either.
+        run = self.run_download(
+            events=[self.merge_event("started", filepath=self.merged_file("clip.mp4"))],
+            raises=RuntimeError("yt-dlp exploded mid-merge"),
+        )
+        self.assertFalse(run.ok)
         self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
 
-    def test_merge_hook_ignores_other_postprocessors(self):
-        opts = self._captured_opts(audio_only=False)
-        hook = opts["postprocessor_hooks"][0]
-        hook({"postprocessor": "Metadata", "status": "started", "info_dict": {}})
-        self.assertEqual(
-            opts["postprocessor_args"]["merger"], transcode_plan.PREMIERE_MERGE_ARGS
-        )
+    def test_stream_copy_never_takes_the_gate(self):
+        merged = self.merged_file("clip.mp4")
+        run = self.run_download(events=[
+            self.merge_event("started", vcodec="avc1.640028", acodec="mp4a.40.2",
+                             filepath=merged),
+            self.merge_event("finished", vcodec="avc1.640028", acodec="mp4a.40.2",
+                             filepath=merged),
+        ])
+        self.assertTrue(run.ok)
+        self.assertEqual(run.merger_args_at_merge[0][:2], ["-c:v", "copy"])
 
 
 class TestParseSections(unittest.TestCase):

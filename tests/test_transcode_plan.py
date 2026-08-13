@@ -35,7 +35,23 @@ class TestContainerFor(unittest.TestCase):
             self.assertEqual(transcode_plan.container_for(audio_only=False), "mp4/mkv")
 
 
-class TestPlanTranscode(unittest.TestCase):
+class GateFreeAfterTest:
+    """Fails the test that leaked the process-wide transcode gate, by name,
+    then frees it so the rest of the suite still runs.
+
+    Deleting this guard outright would not surface a leak as a failure — the
+    gate is a non-reentrant Lock, so the next test to take it would block
+    forever and the suite would hang with no culprit named."""
+
+    def tearDown(self):
+        super().tearDown()
+        leaked = transcode_plan._TRANSCODE_GATE.locked()
+        if leaked:
+            transcode_plan._TRANSCODE_GATE.release()
+        self.assertFalse(leaked, "test leaked the process-wide transcode gate")
+
+
+class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
     """The merge step must never re-encode video unless TRANSCODE_TO_H264 is
     on, and must never re-encode AAC→AAC."""
 
@@ -47,9 +63,7 @@ class TestPlanTranscode(unittest.TestCase):
 
     def tearDown(self):
         transcode_plan._h264_encoder_cache = self._saved_encoder_cache
-        # Guard against a test leaving the global transcode gate held.
-        if transcode_plan._TRANSCODE_GATE.locked():
-            transcode_plan._TRANSCODE_GATE.release()
+        super().tearDown()
 
     def test_h264_source_always_copies(self):
         for flag in (False, True):
@@ -141,22 +155,45 @@ class TestPlanTranscode(unittest.TestCase):
         self.assertIsNone(plan.log_message)
 
 
-class TestGate(unittest.TestCase):
-    def tearDown(self):
-        if transcode_plan._TRANSCODE_GATE.locked():
-            transcode_plan._TRANSCODE_GATE.release()
+class TestMergeSessionGate(GateFreeAfterTest, unittest.TestCase):
+    """Unit-level gate behaviour. The lifecycle sequences that matter — a
+    crashed merge, a playlist's second merge — are driven through the real
+    yt-dlp callback protocol in test_ytdlp_skill.py, because a green unit test
+    here cannot prove that protocol is unable to wedge the session."""
 
-    def test_acquire_then_release(self):
-        transcode_plan.acquire_gate(lambda *a, **k: None)
-        self.assertTrue(transcode_plan._TRANSCODE_GATE.locked())
-        transcode_plan.release_gate()
+    def setUp(self):
+        self.messages = []
+        self.session = transcode_plan.merge_session(
+            lambda msg, tag="info": self.messages.append(msg))
+
+    def _plan(self, needs_gate):
+        return transcode_plan.TranscodePlan(
+            merge_args=[], did_transcode=needs_gate, needs_gate=needs_gate,
+            log_message=None,
+        )
+
+    def test_gated_merge_holds_then_frees(self):
+        with self.session as session:
+            session.merge_started(self._plan(needs_gate=True), "out.mp4")
+            self.assertTrue(transcode_plan._TRANSCODE_GATE.locked())
+            session.merge_finished("out.mp4")
+            self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
+
+    def test_ungated_merge_never_takes_it(self):
+        with self.session as session:
+            session.merge_started(self._plan(needs_gate=False), "out.mp4")
+            self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
+
+    def test_scope_exit_frees_a_merge_that_never_finished(self):
+        with self.session as session:
+            session.merge_started(self._plan(needs_gate=True), "out.mp4")
         self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
 
-    def test_logs_only_when_contended(self):
-        messages = []
-        transcode_plan.acquire_gate(lambda msg, tag: messages.append(msg))
-        self.assertEqual(messages, [])
-        transcode_plan.release_gate()
+    def test_uncontended_acquire_is_silent(self):
+        with self.session as session:
+            session.merge_started(self._plan(needs_gate=True), "out.mp4")
+            session.merge_finished("out.mp4")
+        self.assertEqual(self.messages, [])
 
 
 class TestH264EncoderSelection(unittest.TestCase):
