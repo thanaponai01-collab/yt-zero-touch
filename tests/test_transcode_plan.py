@@ -43,7 +43,7 @@ class TestPlanTranscode(unittest.TestCase):
         # Pin the H.264 fallback to libx264 so results don't depend on
         # whether the test machine happens to have a working NVENC GPU.
         self._saved_encoder_cache = transcode_plan._h264_encoder_cache
-        transcode_plan._h264_encoder_cache = transcode_plan._H264_TRANSCODE_ARGS
+        transcode_plan._h264_encoder_cache = (transcode_plan._H264_TRANSCODE_ARGS, "libx264")
 
     def tearDown(self):
         transcode_plan._h264_encoder_cache = self._saved_encoder_cache
@@ -70,7 +70,7 @@ class TestPlanTranscode(unittest.TestCase):
     def test_vp9_transcodes_when_flag_on(self):
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True), \
              mock.patch.object(transcode_plan, "_h264_transcode_args",
-                               return_value=["-c:v", "libx264"]):
+                               return_value=(["-c:v", "libx264"], "libx264")):
             plan = transcode_plan.plan_transcode("av01.0.12M.08", "opus")
             self.assertEqual(plan.merge_args[:2], ["-c:v", "libx264"])
             self.assertTrue(plan.did_transcode)
@@ -114,7 +114,7 @@ class TestPlanTranscode(unittest.TestCase):
         self.assertTrue(plan.needs_gate)
 
     def test_no_gate_for_nvenc_transcode(self):
-        transcode_plan._h264_encoder_cache = transcode_plan._H264_NVENC_ARGS
+        transcode_plan._h264_encoder_cache = (transcode_plan._H264_NVENC_ARGS, "nvenc")
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
             plan = transcode_plan.plan_transcode("vp9", "mp4a.40.2")
         self.assertTrue(plan.did_transcode)
@@ -170,13 +170,15 @@ class TestH264EncoderSelection(unittest.TestCase):
     def test_prefers_nvenc_when_available(self):
         with mock.patch.object(transcode_plan, "_nvenc_available", return_value=True):
             self.assertEqual(
-                transcode_plan._h264_transcode_args(), transcode_plan._H264_NVENC_ARGS
+                transcode_plan._h264_transcode_args(),
+                (transcode_plan._H264_NVENC_ARGS, "nvenc"),
             )
 
     def test_falls_back_to_libx264_slow(self):
         with mock.patch.object(transcode_plan, "_nvenc_available", return_value=False):
             self.assertEqual(
-                transcode_plan._h264_transcode_args(), transcode_plan._H264_TRANSCODE_ARGS
+                transcode_plan._h264_transcode_args(),
+                (transcode_plan._H264_TRANSCODE_ARGS, "libx264"),
             )
 
     def test_detection_runs_once_and_is_cached(self):

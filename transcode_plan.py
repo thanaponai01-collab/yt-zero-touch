@@ -21,6 +21,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from resolver import LogFn
 
@@ -94,7 +95,7 @@ _H264_NVENC_ARGS = [
     "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
 ]
 
-_h264_encoder_cache: "list[str] | None" = None
+_h264_encoder_cache: "tuple[list[str], Literal['nvenc', 'libx264']] | None" = None
 _h264_encoder_cache_lock = threading.Lock()
 
 
@@ -112,15 +113,18 @@ def _nvenc_available() -> bool:
         return False
 
 
-def _h264_transcode_args() -> "list[str]":
+def _h264_transcode_args() -> "tuple[list[str], Literal['nvenc', 'libx264']]":
     """H.264 encode args for the >1080p fallback — NVENC when the GPU
-    supports it, libx264 slow otherwise. Detection result is cached for the
+    supports it, libx264 slow otherwise — paired with which encoder that is,
+    so callers can branch on the explicit kind instead of comparing object
+    identity against a module constant. Detection result is cached for the
     process lifetime."""
     global _h264_encoder_cache
     with _h264_encoder_cache_lock:
         if _h264_encoder_cache is None:
             _h264_encoder_cache = (
-                _H264_NVENC_ARGS if _nvenc_available() else _H264_TRANSCODE_ARGS
+                (_H264_NVENC_ARGS, "nvenc") if _nvenc_available()
+                else (_H264_TRANSCODE_ARGS, "libx264")
             )
         return _h264_encoder_cache
 
@@ -182,6 +186,15 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     is_h264 = vcodec.startswith(_H264_VCODEC_PREFIXES)
     will_transcode = TRANSCODE_TO_H264 and not is_h264
 
+    # Only called when a transcode is actually needed — keeps the NVENC
+    # detection subprocess probe (see _h264_transcode_args) off the path for
+    # downloads that never transcode.
+    encoder_kind = None
+    if will_transcode:
+        video_args, encoder_kind = _h264_transcode_args()
+    else:
+        video_args = ["-c:v", "copy"]
+
     log_message = None
     if not is_h264 and not TRANSCODE_TO_H264:
         log_message = (
@@ -189,14 +202,13 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
             f"Premiere 2023+ decodes it natively. Set TRANSCODE_TO_H264=True "
             f"for older Premiere."
         )
-    elif not is_h264 and TRANSCODE_TO_H264:
-        encoder = _h264_transcode_args()[1]
+    elif will_transcode:
+        encoder = video_args[1]
         log_message = (
             f"  >1080p source is {vcodec or 'non-H.264'} — transcoding to "
             f"H.264 ({encoder}) for Premiere compatibility (this takes longer)…"
         )
 
-    video_args = _h264_transcode_args() if will_transcode else ["-c:v", "copy"]
     audio_args = (
         [] if acodec.startswith(_AAC_ACODEC_PREFIXES)
         else ["-c:a", "aac", "-b:a", "192k"]
@@ -208,7 +220,7 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     # can OOM the machine). NVENC buffers on the GPU, so concurrent NVENC
     # encodes are cheap on system RAM — don't gate them, or a 4K batch
     # needlessly encodes one-at-a-time.
-    needs_gate = will_transcode and _h264_transcode_args() is _H264_TRANSCODE_ARGS
+    needs_gate = will_transcode and encoder_kind == "libx264"
 
     return TranscodePlan(
         merge_args=merge_args,

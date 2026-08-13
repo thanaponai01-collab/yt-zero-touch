@@ -109,7 +109,7 @@ class TestDownloadApiOptions(unittest.TestCase):
         # Pin the H.264 fallback to libx264 so results don't depend on
         # whether the test machine happens to have a working NVENC GPU.
         self._saved_encoder_cache = transcode_plan._h264_encoder_cache
-        transcode_plan._h264_encoder_cache = transcode_plan._H264_TRANSCODE_ARGS
+        transcode_plan._h264_encoder_cache = (transcode_plan._H264_TRANSCODE_ARGS, "libx264")
 
     def tearDown(self):
         transcode_plan._h264_encoder_cache = self._saved_encoder_cache
