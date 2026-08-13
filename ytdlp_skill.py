@@ -965,12 +965,9 @@ def check_disk_space(
         return True, float("inf")
 
 
-def has_partial_files(out_dir: "Path | str") -> bool:
-    """Return True if any yt-dlp .part files exist in out_dir."""
-    try:
-        return any(Path(out_dir).glob("*.part"))
-    except Exception:
-        return False
+# There is deliberately no has_partial_files() here any more. A leftover .part
+# is resume state or debris from an abandoned attempt — never evidence about
+# the download that just succeeded. See docs/adr/0004.
 
 
 # ---------------------------------------------------------------------------

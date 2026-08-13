@@ -29,7 +29,7 @@ from pathlib import Path
 from ytdlp_skill import (
     Downloader,
     load_history, save_history,
-    check_disk_space, has_partial_files, check_dependencies,
+    check_disk_space, check_dependencies,
     _KNOWN_DOMAINS, _print_log, URL_RE,
 )
 from orchestrator import download_with_retry, DownloadOutcome
@@ -101,6 +101,45 @@ def _download_worker(
     return download_with_retry(download_fn, url=url, log=_print_log)
 
 
+def _harvest_completed(
+    in_flight: "dict[str, Future]",
+    *,
+    history: "set[str]",
+    history_lock: threading.Lock,
+    history_file: Path,
+    stats: "dict[str, int]",
+) -> None:
+    """Record every download that has finished, and drop it from in_flight.
+
+    A truthy DownloadOutcome is recorded as done with no second opinion. The
+    download call already refuses to report success unless yt-dlp returned 0
+    *and* every merged file passed its ffprobe (ADR-0003); re-judging that here
+    from the state of the output directory is what ADR-0004 removed.
+    """
+    for url in [u for u, f in list(in_flight.items()) if f.done()]:
+        future = in_flight.pop(url)
+        ts = datetime.now().strftime("%H:%M:%S")
+        try:
+            outcome = future.result()
+        except Exception as exc:
+            print(f"[{ts}] Worker exception for {url}: {exc}")
+            outcome = None
+
+        if outcome:
+            stats["downloaded"] += 1
+            with history_lock:
+                history.add(url)
+                save_history(history_file, history)
+            print(f"[{ts}] Done: {url}")
+        else:
+            stats["failed"] += 1
+            failure = getattr(outcome, "failure", None)
+            if failure:
+                print(f"[{ts}] Failed ({failure.label}) — {failure.remedy}: {url}")
+            else:
+                print(f"[{ts}] Failed — will retry next time: {url}")
+
+
 def watch(
     url_file: Path,
     out_dir: Path,
@@ -162,35 +201,13 @@ def watch(
             try:
                 while True:
                     # ── 1. Harvest completed futures ──────────────────────
-                    done_urls = [u for u, f in list(in_flight.items()) if f.done()]
-                    for url in done_urls:
-                        future = in_flight.pop(url)
-                        ts = datetime.now().strftime("%H:%M:%S")
-                        try:
-                            outcome = future.result()
-                        except Exception as exc:
-                            print(f"[{ts}] Worker exception for {url}: {exc}")
-                            outcome = None
-                        ok = bool(outcome)
-
-                        # Partial-file guard: if .part files remain, treat as failed
-                        if ok and has_partial_files(out_dir):
-                            print(f"[{ts}] Partial files detected after download — will retry.")
-                            ok = False
-
-                        if ok:
-                            stats["downloaded"] += 1
-                            with history_lock:
-                                history.add(url)
-                                save_history(history_file, history)
-                            print(f"[{ts}] Done: {url}")
-                        else:
-                            stats["failed"] += 1
-                            failure = getattr(outcome, "failure", None)
-                            if failure:
-                                print(f"[{ts}] Failed ({failure.label}) — {failure.remedy}: {url}")
-                            else:
-                                print(f"[{ts}] Failed — will retry next time: {url}")
+                    _harvest_completed(
+                        in_flight,
+                        history=history,
+                        history_lock=history_lock,
+                        history_file=history_file,
+                        stats=stats,
+                    )
 
                     # ── 2. Check for file changes ─────────────────────────
                     try:
