@@ -42,35 +42,13 @@ from resolver import LogFn
 TRANSCODE_TO_H264 = True
 
 # ---------------------------------------------------------------------------
-# Merge args
+# Encoder args
 # ---------------------------------------------------------------------------
 
-# FFmpeg args applied during the video+audio merge step. Video and audio are
-# each decided independently at merge time (see plan_transcode below) based
-# on the actual codecs yt-dlp picked, so a single download can land on any
-# of the four copy/transcode combinations:
-# -c:v copy            → source is already H.264 (always true at ≤1080p,
-#                         since format_sort prefers it there) — no re-encode.
-# -c:v libx264 ...      → source is VP9/AV1 (i.e. >1080p, since format_sort
-#                         only reaches for those above the H.264 ceiling) —
-#                         transcoded to H.264 so the file opens in *any*
-#                         Premiere Pro version, not just 2023+'s native
-#                         VP9/AV1 decode. Slower, but that's the trade for
-#                         "safe" playback everywhere.
-# -c:a aac / -b:a 192k  → source audio isn't AAC (plain "bestaudio" means
-#                         YouTube usually hands back Opus 251) — transcode.
-# -c:a copy             → source audio is already AAC/m4a — skip the
-#                         wasteful AAC→AAC re-encode.
-# -movflags +faststart  → move MP4 index to front for instant Premiere import
-#
-# The merger's ffmpeg args always start with "-c copy" for both streams, so
-# omitting -c:v/-c:a entirely (rather than spelling out "copy") also works —
-# kept explicit here for readability.
-PREMIERE_MERGE_ARGS = [
-    "-c:v", "copy",
-    "-c:a", "aac", "-b:a", "192k",
-    "-movflags", "+faststart",
-]
+# The full-copy merge args, kept as a named value because two tests in
+# test_transcode_plan.py assert plan_transcode produces exactly this for an
+# H.264-plus-AAC source. No production code reads it — do not reach for it as
+# a default; PRE_MERGE_DEFAULT_ARGS below is the one the merger falls back on.
 PREMIERE_MERGE_ARGS_COPY_AUDIO = [
     "-c:v", "copy",
     "-movflags", "+faststart",
@@ -144,8 +122,24 @@ _AAC_ACODEC_PREFIXES = ("mp4a", "aac")
 _H264_VCODEC_PREFIXES = ("avc1", "h264")
 
 # ---------------------------------------------------------------------------
-# Container — decided early, before codecs are known
+# Decided early, before codecs are known
 # ---------------------------------------------------------------------------
+
+# The merge args installed at YoutubeDL() construction, alongside the
+# container commitment below and for the same reason: yt-dlp wants them before
+# any codec is known. A stream copy with an AAC audio track — NOT a transcode,
+# despite what this constant used to be described as.
+#
+# Only reachable if the merger hook never fires, which today means yt-dlp
+# renaming its "Merger" postprocessor key. That is survivable rather than
+# dangerous: a non-H.264 source stream-copied into the forced mp4 is caught by
+# _MergeSession.verify and fails the download, instead of landing in the
+# output folder as a file Premiere reads unreliably.
+PRE_MERGE_DEFAULT_ARGS = [
+    "-c:v", "copy",
+    "-c:a", "aac", "-b:a", "192k",
+    "-movflags", "+faststart",
+]
 
 
 def container_for(audio_only: bool) -> str:
@@ -171,24 +165,56 @@ def container_for(audio_only: bool) -> str:
 # ---------------------------------------------------------------------------
 
 
+CodecCase = Literal["h264", "non_h264", "unknown"]
+
+
 @dataclass(frozen=True)
 class TranscodePlan:
     merge_args: "list[str]"
-    did_transcode: bool
     needs_gate: bool
+    # Which of the three inputs applied. Carried rather than inferred, because
+    # "we could not read the codec" and "the codec is not H.264" lead to the
+    # same ffmpeg args but must not lead to the same log line.
+    codec_case: CodecCase
     log_message: "str | None"
     log_level: str = "info"
 
 
+def _codec_case(vcodec: str) -> CodecCase:
+    """Three cases, not two. An unrecognised-but-present codec (a future
+    "vvc1") is genuinely not H.264 and is named honestly in the log; only an
+    absent one is undeterminable."""
+    if not vcodec:
+        return "unknown"
+    return "h264" if vcodec.startswith(_H264_VCODEC_PREFIXES) else "non_h264"
+
+
 def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     """Pick ffmpeg merge args based on the codecs yt-dlp actually selected.
-    Pure — no I/O, no logging, no locking. The caller applies log_message /
-    needs_gate itself."""
-    vcodec = vcodec.lower()
-    acodec = acodec.lower()
 
-    is_h264 = vcodec.startswith(_H264_VCODEC_PREFIXES)
-    will_transcode = TRANSCODE_TO_H264 and not is_h264
+    Video and audio are decided independently, so a merge can land on any of
+    four combinations:
+
+        -c:v copy             source is already H.264 — no re-encode
+        -c:v libx264/nvenc    source is VP9/AV1, or unreadable — re-encoded so
+                              the file opens in any Premiere version, not just
+                              2023+'s native VP9/AV1 decode
+        -c:a aac -b:a 192k    source audio isn't AAC (plain "bestaudio" means
+                              YouTube usually hands back Opus 251)
+        (no -c:a)             source audio is already AAC/m4a — the merger's
+                              args start with "-c copy", so saying nothing
+                              copies it and skips a pointless AAC→AAC re-encode
+
+    Every combination gets -movflags +faststart, which moves the mp4 index to
+    the front for instant Premiere import.
+
+    Pure — no I/O, no logging, no locking. The caller applies log_message and
+    needs_gate itself."""
+    vcodec = vcodec.strip().lower()
+    acodec = acodec.strip().lower()
+
+    codec_case = _codec_case(vcodec)
+    will_transcode = TRANSCODE_TO_H264 and codec_case != "h264"
 
     # Only called when a transcode is actually needed — keeps the NVENC
     # detection subprocess probe (see _h264_transcode_args) off the path for
@@ -199,18 +225,31 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     else:
         video_args = ["-c:v", "copy"]
 
-    log_message = None
-    if not is_h264 and not TRANSCODE_TO_H264:
+    log_message, log_level = None, "info"
+    if codec_case != "h264" and not TRANSCODE_TO_H264:
         log_message = (
             f"  Keeping {vcodec or 'source'} video untouched (stream copy) — "
             f"Premiere 2023+ decodes it natively. Set TRANSCODE_TO_H264=True "
             f"for older Premiere."
         )
-    elif will_transcode:
-        encoder = video_args[1]
+    elif will_transcode and codec_case == "unknown":
+        # Say what actually happened. Claiming the source was non-H.264 here
+        # is a guess dressed as a fact, and it sent editors looking for a VP9
+        # source that was H.264 all along. Transcoding anyway is the deliberate
+        # trade: the container is already committed to mp4, so copying an
+        # unidentified stream risks the VP9-in-mp4 artifact this module exists
+        # to prevent, and a transcode is always container-legal.
         log_message = (
-            f"  >1080p source is {vcodec or 'non-H.264'} — transcoding to "
-            f"H.264 ({encoder}) for Premiere compatibility (this takes longer)…"
+            f"  Could not determine the source video codec — transcoding to "
+            f"H.264 ({encoder_kind}) so the mp4 container is guaranteed legal. "
+            f"This is slower than a stream copy; if it keeps happening, "
+            f"yt-dlp's callback payload has probably changed shape."
+        )
+        log_level = "warn"
+    elif will_transcode:
+        log_message = (
+            f"  >1080p source is {vcodec} — transcoding to H.264 "
+            f"({encoder_kind}) for Premiere compatibility (this takes longer)…"
         )
 
     audio_args = (
@@ -228,9 +267,10 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
 
     return TranscodePlan(
         merge_args=merge_args,
-        did_transcode=will_transcode,
         needs_gate=needs_gate,
+        codec_case=codec_case,
         log_message=log_message,
+        log_level=log_level,
     )
 
 # ---------------------------------------------------------------------------
