@@ -342,6 +342,81 @@ class TestMergeLifecycle(DownloadApiHarness):
         self.assertEqual(run.merger_args_at_merge[0][:2], ["-c:v", "copy"])
 
 
+class TestOutputVerification(DownloadApiHarness):
+    """mp4 is forced before any codec is known, on the promise that a
+    transcode will make it legal. Collecting on that promise is ffprobe's job,
+    not a bookkeeping flag's."""
+
+    def setUp(self):
+        super().setUp()
+        self._flag = mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True)
+        self._flag.start()
+        self.addCleanup(self._flag.stop)
+
+    def _merged(self, name, **kw):
+        path = self.merged_file(name)
+        return path, [self.merge_event("started", filepath=path, **kw),
+                      self.merge_event("finished", filepath=path, **kw)]
+
+    def test_h264_stream_copy_is_still_verified_and_passes(self):
+        # The guard against reading "the commitment was not honoured" as "no
+        # transcode was recorded": this download legitimately never
+        # transcodes, and must still be verified and must still succeed.
+        merged, events = self._merged("clip.mp4", vcodec="avc1.640028",
+                                      acodec="mp4a.40.2")
+        run = self.run_download(events=events, probe_codec="h264")
+        self.assertTrue(run.ok)
+        self.assertEqual(run.merger_args_at_merge[0][:2], ["-c:v", "copy"])
+        self.assertEqual(run.verified, [merged])
+
+    def test_output_that_is_not_h264_fails_loudly(self):
+        # A transcode that was silently skipped reads back as vp9. Nothing
+        # about the download reported an error, so only the probe can catch it.
+        _, events = self._merged("clip.mp4")
+        run = self.run_download(events=events, probe_codec="vp9")
+        self.assertFalse(run.ok)
+        self.assertIn("Output verification FAILED", run.log_text())
+        self.assertIn("codec=vp9", run.log_text())
+
+    def test_every_playlist_entry_is_verified(self):
+        one, two, three = (self.merged_file(n) for n in
+                           ("one.mp4", "two.mp4", "three.mp4"))
+        events = []
+        for path in (one, two, three):
+            events.append(self.merge_event("started", filepath=path))
+            events.append(self.merge_event("finished", filepath=path))
+        run = self.run_download(events=events)
+        self.assertTrue(run.ok)
+        self.assertEqual(run.verified, [one, two, three])
+
+    def test_a_failed_entry_short_circuits_before_verification(self):
+        # yt-dlp's nonzero retcode already condemns the download, so there is
+        # nothing for verification to add — and a crashed merge leaves no
+        # finished file to probe in the first place.
+        one, two = self.merged_file("one.mp4"), self.merged_file("two.mp4")
+        run = self.run_download(events=[
+            self.merge_event("started", filepath=one),     # dies, no finish
+            self.merge_event("started", filepath=two),
+            self.merge_event("finished", filepath=two),
+        ], retcode=1)
+        self.assertFalse(run.ok)
+        self.assertEqual(run.verified, [])
+
+    def test_audio_only_download_is_never_verified(self):
+        run = self.run_download(audio_only=True)
+        self.assertTrue(run.ok)
+        self.assertEqual(run.verified, [])
+
+    def test_no_verification_when_the_container_was_not_forced(self):
+        # Flag off: container_for returns "mp4/mkv", nothing was promised, so
+        # a VP9 stream copy is a legitimate output and must not be probed.
+        _, events = self._merged("clip.mkv")
+        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", False):
+            run = self.run_download(events=events, probe_codec="vp9")
+        self.assertTrue(run.ok)
+        self.assertEqual(run.verified, [])
+
+
 class TestParseSections(unittest.TestCase):
     def test_basic_range(self):
         from ytdlp_skill import parse_sections

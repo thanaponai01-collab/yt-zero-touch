@@ -273,13 +273,19 @@ class _MergeSession:
     __exit__.
     """
 
-    def __init__(self, log: LogFn):
+    def __init__(self, log: LogFn, container: str):
         self._log = log
         self._holding_gate = False
-        # Whether a video transcode ran, and where the merged file landed —
-        # read by the caller after the download to decide on verification.
-        self.transcoded = False
-        self.filepath: "str | None" = None
+        # The container commitment, taken straight from the value that went
+        # into ydl_opts so there is no second source of truth. "mp4" means we
+        # forced an mp4 before any codec was known, on the promise that a
+        # transcode would make it legal — a promise verify() collects on.
+        self._committed_to_mp4 = container == "mp4"
+        # Merged outputs, in the order yt-dlp produced them. A playlist runs
+        # several merges inside one download call, so this cannot be a single
+        # slot without silently verifying only the last entry.
+        self._merged: "list[str]" = []
+        self._finished: "list[str]" = []
 
     def __enter__(self) -> "_MergeSession":
         return self
@@ -300,16 +306,46 @@ class _MergeSession:
             self._log("  Previous merge ended without reporting back — freeing "
                       "the transcode gate for this one.", "warn")
             self._free_gate()
-        self.transcoded = plan.did_transcode
-        self.filepath = filepath
+        if filepath:
+            self._merged.append(filepath)
         if plan.needs_gate:
             self._take_gate()
 
     def merge_finished(self, filepath: "str | None") -> None:
         """The merge completed and ffmpeg has renamed its output into place."""
-        if filepath:
-            self.filepath = filepath
+        # Prefer the path recorded at "started": yt-dlp hands the "finished"
+        # callback the same pre-run infodict copy, so this adds nothing, but a
+        # future payload change that drops it must not lose the file.
+        landed = filepath or (self._merged[-1] if self._merged else None)
+        if landed:
+            self._finished.append(landed)
         self._free_gate()
+
+    def verify(self) -> bool:
+        """Collect on the container commitment, by measurement.
+
+        mp4 was forced before any codec was known, on the promise that a
+        transcode would follow. Rather than ask whether that transcode was
+        recorded — the bookkeeping that lied in the first place — ffprobe every
+        file that merged successfully. An H.264 stream copy reads back as h264
+        and passes; a transcode that was silently skipped reads back as vp9 and
+        fails. Nothing this consults is capable of lying.
+
+        Runs after the download call rather than at each "finished", because
+        FFmpegMetadata and EmbedThumbnail rewrite the file after the merger.
+        """
+        if not self._committed_to_mp4:
+            return True
+        ok = True
+        for path in self._finished:
+            if not Path(path).exists():
+                self._log(f"  Could not locate merged output for verification "
+                          f"({Path(path).name}) — check the file manually "
+                          f"before importing.", "warn")
+                continue
+            if not verify_h264_output(path, self._log):
+                ok = False
+        return ok
 
     def _take_gate(self) -> None:
         if not _TRANSCODE_GATE.acquire(blocking=False):
@@ -324,21 +360,28 @@ class _MergeSession:
             _TRANSCODE_GATE.release()
 
 
-def merge_session(log: LogFn) -> _MergeSession:
+def merge_session(log: LogFn, container: str) -> _MergeSession:
     """Open a merge session for one download. Use as a context manager around
-    the yt-dlp download call, and feed it the merger's callbacks."""
-    return _MergeSession(log)
+    the yt-dlp download call, and feed it the merger's callbacks. `container`
+    is the merge_output_format that went into ydl_opts — see container_for."""
+    return _MergeSession(log, container)
 
 # ---------------------------------------------------------------------------
-# Post-transcode verification
+# Output verification
 # ---------------------------------------------------------------------------
+
+# ffprobe missing is a property of the machine, not of the download, so say so
+# once rather than on every merged file for the rest of the session.
+_ffprobe_missing_reported = False
 
 
 def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
-    """ffprobe the final file after a transcode to confirm it really is
-    decodable H.264 — protects against a silently-truncated/corrupt output
-    (crashed encoder, full disk, OOM-killed ffmpeg) that would otherwise
-    only be discovered when the file fails to open in Premiere later."""
+    """ffprobe a merged file to confirm its video stream really is decodable
+    H.264 — catching both a silently-truncated/corrupt output (crashed
+    encoder, full disk, OOM-killed ffmpeg) and a transcode that should have
+    run and didn't, either of which would otherwise only be discovered when
+    the file fails to open in Premiere later."""
+    global _ffprobe_missing_reported
     try:
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -346,15 +389,19 @@ def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
             capture_output=True, text=True, timeout=60,
         )
     except FileNotFoundError:
-        log("  ffprobe not found — skipping post-transcode verification.", "warn")
+        if not _ffprobe_missing_reported:
+            _ffprobe_missing_reported = True
+            log("  ffprobe not found — skipping output verification for this "
+                "session.", "warn")
         return True
     except Exception as exc:
-        log(f"  Post-transcode verification errored ({exc}) — treating as failed.", "error")
+        log(f"  Output verification errored ({exc}) — treating as failed.", "error")
         return False
     codec = (proc.stdout or "").strip().splitlines()[0] if proc.stdout else ""
     if proc.returncode == 0 and codec == "h264":
         log("  Verified: output is clean H.264 — safe for any Premiere version.", "info")
         return True
-    log(f"  Post-transcode verification FAILED (codec={codec or 'unreadable'}) — "
-        f"the output file may be corrupt. Marking this download failed.", "error")
+    log(f"  Output verification FAILED (codec={codec or 'unreadable'}, expected "
+        f"h264) — {Path(path).name} is corrupt or was never transcoded. Marking "
+        f"this download failed.", "error")
     return False

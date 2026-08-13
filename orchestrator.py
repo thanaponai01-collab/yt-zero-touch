@@ -65,11 +65,25 @@ _REMOVED = FailureClass(
     "removed", "Video removed or unavailable",
     "The video was deleted or made private at the source — nothing to do.",
     permanent=True)
+# Our own check, not the source's: the merged file was ffprobed and its video
+# stream isn't H.264. Permanent because re-downloading cannot change the
+# answer — without this it classifies as None, i.e. transient, and a 4K source
+# pays for four full 16-minute encodes to arrive at the same verdict.
+_UNVERIFIED = FailureClass(
+    "output_unverified", "Output failed its H.264 check",
+    "The merged file isn't clean H.264 — check free disk space and that ffmpeg "
+    "works, then retry this URL on its own.",
+    permanent=True)
 
 
 # Ordered rules — first matching keyword wins, so more specific causes
 # (login, geo) are listed before the catch-all "removed".
 _FAILURE_RULES: "list[tuple[FailureClass, list[str]]]" = [
+    # First: this one names our own verification step, so it can never be
+    # mistaken for an extractor message that happens to share a keyword.
+    (_UNVERIFIED,
+     ["output verification failed", "output verification errored"]),
+
     (_LOGIN,
      ["sign in to confirm", "private video", "http error 403", "http error 401",
       "age-restricted", "age restricted", "login required", "members-only",

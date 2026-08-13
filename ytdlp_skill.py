@@ -652,10 +652,16 @@ def _download_api(
             {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
         )
 
-    # Owns the merge lifecycle for this download — the transcode gate and
-    # where the merged file landed. Entered around the download call below, so
-    # the gate is freed however that call ends.
-    merge = transcode_plan.merge_session(log)
+    # The container is committed here, before any codec is known, because
+    # YoutubeDL() reads merge_output_format at construction — see
+    # transcode_plan.container_for. The session is handed the same value so it
+    # can collect on that commitment after the download.
+    container = transcode_plan.container_for(audio_only)
+
+    # Owns the merge lifecycle for this download — the transcode gate, the
+    # merged files, and their verification. Entered around the download call
+    # below, so the gate is freed however that call ends.
+    merge = transcode_plan.merge_session(log, container)
 
     def _tune_merge_args_for_premiere(status: dict):
         """Adapter: pull the real codecs out of yt-dlp's callback payload, ask
@@ -695,10 +701,7 @@ def _download_api(
         "format":                        fmt,
         "outtmpl":                       str(outtmpl),
         "noplaylist":                    not playlist,
-        # Container is decided by transcode_plan — see container_for() for
-        # why (merge_output_format is read at YoutubeDL() construction,
-        # before the real codecs are known).
-        "merge_output_format":           transcode_plan.container_for(audio_only),
+        "merge_output_format":           container,
         "overwrites":                    force,
         "addmetadata":                   True,
         "writethumbnail":                True,
@@ -789,16 +792,9 @@ def _download_api(
             return False
         if ret != 0:
             return False
-        # If the >1080p H.264 fallback ran, confirm the final file really is
-        # decodable H.264 before declaring success — "rare 4K, but when it
-        # happens it must work".
-        if merge.transcoded:
-            merged = merge.filepath
-            if merged and Path(merged).exists():
-                return transcode_plan.verify_h264_output(merged, log)
-            log("  Could not locate merged output for post-transcode "
-                "verification — check the file manually before importing.", "warn")
-        return True
+        # Collect on the container commitment: every file that merged is
+        # ffprobed before this reports success. See _MergeSession.verify.
+        return merge.verify()
     except _SectionTimeout:
         _log_section_timeout(sections, log)
         return False
