@@ -99,12 +99,10 @@ class TestClassifyFailure(unittest.TestCase):
 
 
 class TestDownloadWithRetry(unittest.TestCase):
-    def _policy(self, **kw):
-        return BatchPolicy(out_dir=Path("."), retry_delays=(0, 0, 0), **kw)
-
     def test_success_returns_truthy_outcome(self):
         outcome = download_with_retry(
-            lambda log, hook: True, policy=self._policy(), url="x", sleep=lambda *_: None,
+            lambda log, hook: True,
+            retry_delays=(0, 0, 0), url="x", sleep=lambda *_: None,
         )
         self.assertTrue(outcome.ok)
         self.assertTrue(outcome)          # __bool__ keeps old callers working
@@ -117,7 +115,7 @@ class TestDownloadWithRetry(unittest.TestCase):
             log("ERROR: Private video", "error")
             return False
         outcome = download_with_retry(
-            dl, policy=self._policy(retry_max=3), url="x", sleep=lambda *_: None,
+            dl, retry_max=3, retry_delays=(0, 0, 0), url="x", sleep=lambda *_: None,
         )
         self.assertFalse(outcome.ok)
         self.assertEqual(len(calls), 1)   # short-circuited, no retries
@@ -130,7 +128,7 @@ class TestDownloadWithRetry(unittest.TestCase):
             log("ERROR: connection reset by peer", "error")
             return False
         outcome = download_with_retry(
-            dl, policy=self._policy(retry_max=2), url="x", sleep=lambda *_: None,
+            dl, retry_max=2, retry_delays=(0, 0, 0), url="x", sleep=lambda *_: None,
         )
         self.assertFalse(outcome.ok)
         self.assertEqual(len(calls), 3)   # initial + 2 retries

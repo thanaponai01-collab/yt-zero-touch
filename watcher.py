@@ -32,7 +32,7 @@ from ytdlp_skill import (
     check_disk_space, has_partial_files, check_dependencies,
     _KNOWN_DOMAINS, _print_log, URL_RE,
 )
-from orchestrator import download_with_retry, BatchPolicy, DownloadOutcome
+from orchestrator import download_with_retry, DownloadOutcome
 
 # ---------------------------------------------------------------------------
 # URL detection — URL_RE comes from ytdlp_skill so the GUI and watcher don't drift.
@@ -84,8 +84,6 @@ def _download_worker(
     Shares the orchestrator's retry + permanent-error classification with the
     GUI so a fix to one reaches both.
     """
-    policy = BatchPolicy(out_dir=out_dir)  # only retry_max/retry_delays are read here
-
     def download_fn(log, progress_hook):
         return dl.download(
             url,
@@ -100,7 +98,7 @@ def _download_worker(
             progress_hook=progress_hook,
         )
 
-    return download_with_retry(download_fn, policy=policy, url=url, log=_print_log)
+    return download_with_retry(download_fn, url=url, log=_print_log)
 
 
 def watch(

@@ -147,6 +147,12 @@ def build_output_template(idx: int, url: str, resolved: str, total: int, pad: in
 # Policy + result
 # ---------------------------------------------------------------------------
 
+# Shared with download_with_retry's own retry_max/retry_delays defaults below
+# so the two don't drift apart.
+_DEFAULT_RETRY_MAX = 3
+_DEFAULT_RETRY_DELAYS = (5, 15, 30)
+
+
 @dataclass
 class BatchPolicy:
     out_dir: Path
@@ -161,8 +167,8 @@ class BatchPolicy:
     playlist: bool = False
     sections: "str | None" = None    # e.g. "10:00-20:00" — trim to a clip
     max_workers: int = 3
-    retry_max: int = 3
-    retry_delays: tuple = (5, 15, 30)
+    retry_max: int = _DEFAULT_RETRY_MAX
+    retry_delays: tuple = _DEFAULT_RETRY_DELAYS
 
 
 @dataclass
@@ -194,7 +200,8 @@ class DownloadOutcome:
 def download_with_retry(
     download_fn: "Callable[[LogFn, Callable[[dict], None]], bool]",
     *,
-    policy: BatchPolicy,
+    retry_max: int = _DEFAULT_RETRY_MAX,
+    retry_delays: tuple = _DEFAULT_RETRY_DELAYS,
     url: str,
     idx: "int | None" = None,
     log: LogFn = _print_log,
@@ -248,7 +255,7 @@ def download_with_retry(
     set_item("downloading", None)
 
     last_errors: list[str] = []
-    for attempt in range(1, policy.retry_max + 2):
+    for attempt in range(1, retry_max + 2):
         captured_errors: list[str] = []
 
         def log_capture(msg: str, tag: str = "info"):
@@ -266,8 +273,8 @@ def download_with_retry(
             set_item("failed", None)
             return DownloadOutcome(ok=False, failure=failure)
 
-        if attempt <= policy.retry_max:
-            delay = policy.retry_delays[attempt - 1]
+        if attempt <= retry_max:
+            delay = retry_delays[attempt - 1]
             base_log(f"  Attempt {attempt} failed — retrying in {delay}s…", "warn")
             set_item("retrying", None)
             for s in range(delay, 0, -1):
@@ -275,7 +282,7 @@ def download_with_retry(
                 set_status(f"Retry #{attempt} for {label}in {s}s…")
                 sleep(1)
 
-    base_log(f"  All {policy.retry_max + 1} attempts failed.", "error")
+    base_log(f"  All {retry_max + 1} attempts failed.", "error")
     set_item("failed", None)
     return DownloadOutcome(ok=False, failure=classify_failure(last_errors))
 
@@ -390,7 +397,8 @@ def run_batch(
             executor.submit(
                 download_with_retry,
                 _make_download_fn(downloader, policy, resolved, tpl),
-                policy=policy, url=url, idx=idx, log=log, set_status=set_status,
+                retry_max=policy.retry_max, retry_delays=policy.retry_delays,
+                url=url, idx=idx, log=log, set_status=set_status,
                 set_item=_item_cb(idx, url),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
