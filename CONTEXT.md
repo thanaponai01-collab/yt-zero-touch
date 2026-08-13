@@ -37,6 +37,15 @@ software encode at a time. Concurrent 4K libx264 encodes stack multi-GB
 allocations and can OOM the machine. NVENC buffers on the GPU and is not
 gated. Only the merge session may touch it.
 
+**Encoder** (`transcode_plan.Encoder`) — the H.264 encoder a transcode will
+run, in the two vocabularies that must agree about it. Its **kind** (`nvenc`,
+`libx264`) is for *branching* — it answers "does this need the transcode
+gate". Its **name** (`h264_nvenc`, `libx264`) is the ffmpeg encoder, for
+humans and for `ffmpeg -h encoder=…`. They coincide on the software path,
+which is a trap rather than a convenience: code that logs the kind reads
+correctly there and names a non-existent encoder on the GPU path. `name` is
+derived from the args for that reason, never stored.
+
 **Codec case** — which of three things `plan_transcode` found: a known H.264
 codec, a known non-H.264 codec, or one it could not read at all. The third is
 its own case because it leads to the same ffmpeg args as the second but must

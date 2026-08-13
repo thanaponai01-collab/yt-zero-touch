@@ -69,15 +69,43 @@ _H264_TRANSCODE_ARGS = [
 # settings (p7 = highest-quality NVENC preset, CQ 19) output is visually on
 # par with libx264 slow for editing footage, but encodes roughly 5-10x faster
 # — a ~16-minute 4K60 software encode drops to a couple of minutes. Detected
-# once at first use (see _h264_transcode_args) with a real 3-frame test
-# encode, because h264_nvenc can be *listed* by ffmpeg builds that still fail
-# at runtime when no NVIDIA GPU/driver is present.
+# once at first use (see _h264_encoder) with a real 3-frame test encode,
+# because h264_nvenc can be *listed* by ffmpeg builds that still fail at
+# runtime when no NVIDIA GPU/driver is present.
 _H264_NVENC_ARGS = [
     "-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq",
     "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
 ]
 
-_h264_encoder_cache: "tuple[list[str], Literal['nvenc', 'libx264']] | None" = None
+
+@dataclass(frozen=True)
+class Encoder:
+    """One H.264 encoder, in the two vocabularies that have to agree about it.
+
+    `name` is *derived* from `args` rather than stored next to them, because
+    the version of this record that carried both separately is what let a log
+    line name `nvenc` — an encoder ffmpeg does not have. Two stored
+    representations can drift and need a test to notice; a derived one
+    cannot drift at all.
+    """
+
+    # The ffmpeg args that run this encoder, "-c:v <name>" first.
+    args: "list[str]"
+    # Which encoder this is, for *branching*: the transcode gate serializes
+    # libx264 and lets NVENC run concurrently. Not for display — see name.
+    kind: Literal["nvenc", "libx264"]
+
+    @property
+    def name(self) -> str:
+        """The ffmpeg encoder name — literally what `-c:v` is set to, so it
+        can be pasted into `ffmpeg -h encoder=…` or matched against a build's
+        `-encoders` output. That is the only reason logs name an encoder at
+        all, and it is why `kind` will not do: the two happen to be the same
+        string for libx264 and differ for NVENC (`nvenc` vs `h264_nvenc`)."""
+        return self.args[self.args.index("-c:v") + 1]
+
+
+_h264_encoder_cache: "Encoder | None" = None
 _h264_encoder_cache_lock = threading.Lock()
 
 
@@ -95,18 +123,17 @@ def _nvenc_available() -> bool:
         return False
 
 
-def _h264_transcode_args() -> "tuple[list[str], Literal['nvenc', 'libx264']]":
-    """H.264 encode args for the >1080p fallback — NVENC when the GPU
-    supports it, libx264 slow otherwise — paired with which encoder that is,
-    so callers can branch on the explicit kind instead of comparing object
-    identity against a module constant. Detection result is cached for the
-    process lifetime."""
+def _h264_encoder() -> Encoder:
+    """The H.264 encoder for the >1080p fallback — NVENC when the GPU
+    supports it, libx264 slow otherwise — as a record carrying its args, its
+    kind for branching, and its ffmpeg name for logs. Detection result is
+    cached for the process lifetime."""
     global _h264_encoder_cache
     with _h264_encoder_cache_lock:
         if _h264_encoder_cache is None:
             _h264_encoder_cache = (
-                (_H264_NVENC_ARGS, "nvenc") if _nvenc_available()
-                else (_H264_TRANSCODE_ARGS, "libx264")
+                Encoder(_H264_NVENC_ARGS, "nvenc") if _nvenc_available()
+                else Encoder(_H264_TRANSCODE_ARGS, "libx264")
             )
         return _h264_encoder_cache
 
@@ -196,9 +223,10 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     four combinations:
 
         -c:v copy             source is already H.264 — no re-encode
-        -c:v libx264/nvenc    source is VP9/AV1, or unreadable — re-encoded so
-                              the file opens in any Premiere version, not just
-                              2023+'s native VP9/AV1 decode
+        -c:v h264_nvenc       source is VP9/AV1, or unreadable — re-encoded so
+          (libx264 on a       the file opens in any Premiere version, not just
+           machine without    2023+'s native VP9/AV1 decode
+           an NVENC GPU)
         -c:a aac -b:a 192k    source audio isn't AAC (plain "bestaudio" means
                               YouTube usually hands back Opus 251)
         (no -c:a)             source audio is already AAC/m4a — the merger's
@@ -217,11 +245,16 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     will_transcode = TRANSCODE_TO_H264 and codec_case != "h264"
 
     # Only called when a transcode is actually needed — keeps the NVENC
-    # detection subprocess probe (see _h264_transcode_args) off the path for
+    # detection subprocess probe (see _h264_encoder) off the path for
     # downloads that never transcode.
-    encoder_kind = None
+    #
+    # The copy branch stays a bare list rather than an Encoder: "copy" is the
+    # *absence* of an encoder, and folding it in would widen kind with a value
+    # needs_gate can never see.
+    encoder = None
     if will_transcode:
-        video_args, encoder_kind = _h264_transcode_args()
+        encoder = _h264_encoder()
+        video_args = encoder.args
     else:
         video_args = ["-c:v", "copy"]
 
@@ -241,7 +274,7 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
         # to prevent, and a transcode is always container-legal.
         log_message = (
             f"  Could not determine the source video codec — transcoding to "
-            f"H.264 ({encoder_kind}) so the mp4 container is guaranteed legal. "
+            f"H.264 ({encoder.name}) so the mp4 container is guaranteed legal. "
             f"This is slower than a stream copy; if it keeps happening, "
             f"yt-dlp's callback payload has probably changed shape."
         )
@@ -249,7 +282,7 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     elif will_transcode:
         log_message = (
             f"  >1080p source is {vcodec} — transcoding to H.264 "
-            f"({encoder_kind}) for Premiere compatibility (this takes longer)…"
+            f"({encoder.name}) for Premiere compatibility (this takes longer)…"
         )
 
     audio_args = (
@@ -263,7 +296,7 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
     # can OOM the machine). NVENC buffers on the GPU, so concurrent NVENC
     # encodes are cheap on system RAM — don't gate them, or a 4K batch
     # needlessly encodes one-at-a-time.
-    needs_gate = will_transcode and encoder_kind == "libx264"
+    needs_gate = will_transcode and encoder.kind == "libx264"
 
     return TranscodePlan(
         merge_args=merge_args,

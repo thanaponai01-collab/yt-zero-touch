@@ -129,7 +129,8 @@ class DownloadApiHarness(GateFreeAfterTest, unittest.TestCase):
         # Pin the H.264 fallback to libx264 so results don't depend on
         # whether the test machine happens to have a working NVENC GPU.
         self._saved_encoder_cache = transcode_plan._h264_encoder_cache
-        transcode_plan._h264_encoder_cache = (transcode_plan._H264_TRANSCODE_ARGS, "libx264")
+        transcode_plan._h264_encoder_cache = transcode_plan.Encoder(
+            transcode_plan._H264_TRANSCODE_ARGS, "libx264")
         self.tmp = Path(__file__).resolve().parent / "_tmp_download_api"
         self.tmp.mkdir(exist_ok=True)
 
