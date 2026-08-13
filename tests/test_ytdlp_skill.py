@@ -177,56 +177,27 @@ class TestDownloadApiOptions(unittest.TestCase):
         self.assertNotIn("postprocessor_args", opts)
         self.assertNotIn("postprocessor_hooks", opts)
 
-    def _run_hook(self, opts, vcodec, acodec):
-        hook = opts["postprocessor_hooks"][0]
-        info_dict = {"requested_formats": [
-            {"acodec": "none", "vcodec": vcodec},
-            {"acodec": acodec, "vcodec": "none"},
-        ]}
-        hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
-        merger_args = list(opts["postprocessor_args"]["merger"])
-        # Complete the merger lifecycle so the hook releases the global
-        # transcode gate it may have acquired on "started".
-        hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
-        return merger_args
-
-    def test_merge_hook_full_copy_for_h264_plus_aac(self):
-        opts = self._captured_opts(audio_only=False)
-        merger_args = self._run_hook(opts, "avc1.640028", "mp4a.40.2")
-        self.assertEqual(merger_args, transcode_plan.PREMIERE_MERGE_ARGS_COPY_AUDIO)
-
-    def test_merge_hook_transcodes_audio_only_for_h264_plus_opus(self):
-        opts = self._captured_opts(audio_only=False)
-        merger_args = self._run_hook(opts, "avc1.640028", "opus")
-        self.assertEqual(merger_args, transcode_plan.PREMIERE_MERGE_ARGS)
-
-    def test_merge_hook_copies_vp9_when_transcode_disabled(self):
-        # Flag off (Premiere 2023+ decodes VP9/AV1 natively): >1080p VP9
-        # passes through untouched — no re-encode, no generation loss.
-        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", False):
-            opts = self._captured_opts(audio_only=False)
-            merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
-        self.assertEqual(merger_args, transcode_plan.PREMIERE_MERGE_ARGS_COPY_AUDIO)
-
-    def test_merge_hook_transcodes_video_only_for_vp9_plus_aac(self):
-        # With the flag on (pre-2023 Premiere): video needs the H.264
-        # fallback, audio is already AAC so it can still be copied.
+    def test_hook_wires_plan_into_ydl_opts_and_manages_gate(self):
+        # The closure's own job, not transcode_plan's: pull vcodec/acodec out
+        # of yt-dlp's requested_formats shape, apply the resulting merge_args
+        # to ydl_opts, and hold the transcode gate for the lifetime of the
+        # merge. Scenario coverage for the decision itself (copy vs.
+        # transcode, per codec pair) lives in test_transcode_plan.py.
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
             opts = self._captured_opts(audio_only=False)
-            merger_args = self._run_hook(opts, "vp9", "mp4a.40.2")
-        self.assertEqual(
-            merger_args, [*transcode_plan._H264_TRANSCODE_ARGS, "-movflags", "+faststart"]
-        )
-
-    def test_merge_hook_transcodes_both_for_av1_plus_opus(self):
-        with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
-            opts = self._captured_opts(audio_only=False)
-            merger_args = self._run_hook(opts, "av01.0.05M.08", "opus")
-        self.assertEqual(
-            merger_args,
-            [*transcode_plan._H264_TRANSCODE_ARGS, "-c:a", "aac", "-b:a", "192k",
-             "-movflags", "+faststart"],
-        )
+            hook = opts["postprocessor_hooks"][0]
+            info_dict = {"requested_formats": [
+                {"acodec": "none", "vcodec": "vp9"},
+                {"acodec": "opus", "vcodec": "none"},
+            ]}
+            hook({"postprocessor": "Merger", "status": "started", "info_dict": info_dict})
+            self.assertTrue(transcode_plan._TRANSCODE_GATE.locked())
+            self.assertEqual(
+                opts["postprocessor_args"]["merger"],
+                transcode_plan.plan_transcode("vp9", "opus").merge_args,
+            )
+            hook({"postprocessor": "Merger", "status": "finished", "info_dict": info_dict})
+        self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
 
     def test_merge_hook_ignores_other_postprocessors(self):
         opts = self._captured_opts(audio_only=False)
