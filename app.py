@@ -528,11 +528,19 @@ class App(tk.Tk):
         self.after(0, _do)
 
     def _on_item(self, idx, url, status, pct):
-        """orchestrator callback — update one queue row. Runs off-thread."""
+        """orchestrator callback — update one queue row. Runs off-thread.
+
+        idx can exceed the row count _reset_queue pre-populated: a page URL
+        that embeds several videos (see resolver.resolve_urls) fans out into
+        one work item per video, so a row is created here on first sight.
+        """
         def _do():
             iid = self._queue_rows.get(idx)
             if not iid:
-                return
+                short = url if len(url) <= 70 else url[:67] + "…"
+                iid = self.queue.insert(
+                    "", "end", values=(idx, short, "Queued", ""), tags=("queued",))
+                self._queue_rows[idx] = iid
             label, _color = _STATUS_STYLE.get(status, (status.title(), COLORS["text"]))
             if status == "downloading" and pct is not None:
                 prog = f"{pct:.0f}%"

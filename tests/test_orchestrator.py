@@ -196,7 +196,7 @@ class TestRunBatch(unittest.TestCase):
             history_lock=threading.Lock(),
             history_path=self.history_path,
             log=lambda *a, **k: None,
-            resolve_fn=lambda url, **kw: url,   # identity resolver
+            resolve_fn=lambda url, **kw: [url],   # identity resolver
             playwright_ok=False,                # no browser in tests
         )
 
@@ -270,7 +270,7 @@ class TestRunBatch(unittest.TestCase):
             history=set(), history_lock=threading.Lock(),
             history_path=self.history_path, log=lambda *a, **k: None,
             on_item=on_item,
-            resolve_fn=lambda url, **kw: url, playwright_ok=False,
+            resolve_fn=lambda url, **kw: [url], playwright_ok=False,
         )
         terminal = {(idx, st) for idx, st in events if st in ("done", "failed")}
         self.assertIn((1, "done"), terminal)

@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from resolver import resolve_url, _launch_temp_browser, _PLAYWRIGHT_OK, LogFn, _print_log
+from resolver import resolve_urls, _launch_temp_browser, _PLAYWRIGHT_OK, LogFn, _print_log
 from ytdlp_skill import save_history
 
 # ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ def run_batch(
     log: LogFn = _print_log,
     set_status: "Callable[[str], None]" = lambda *_: None,
     on_item: "Callable[[int, str, str, float | None], None]" = lambda *a: None,
-    resolve_fn: "Callable" = resolve_url,
+    resolve_fn: "Callable" = resolve_urls,
     browser_factory: "Callable" = _launch_temp_browser,
     playwright_ok: bool = _PLAYWRIGHT_OK,
 ) -> BatchResult:
@@ -367,23 +367,34 @@ def run_batch(
     )
     work_items: list[tuple[int, str, str, str]] = []
     try:
-        for idx, url in enumerate(urls, 1):
+        idx = 0
+        for url in urls:
             ts = datetime.now().strftime("%H:%M:%S")
             if url in history and not policy.force:
+                idx += 1
                 log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
                 on_item(idx, url, "skipped", None)
                 continue
             if policy.gallery:
-                resolved, tpl = url, ""        # gallery-dl ignores the template
+                idx += 1
+                resolved_list = [url]           # gallery-dl ignores the template
             else:
-                log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
-                on_item(idx, url, "resolving", None)
-                resolved = resolve_fn(
+                log(f"\n[{ts}] Resolving {idx + 1}/{len(urls)}: {url[:80]}", "accent")
+                on_item(idx + 1, url, "resolving", None)
+                resolved_list = resolve_fn(
                     url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
                 )
-                tpl = build_output_template(idx, url, resolved, len(urls), pad)
-            on_item(idx, url, "queued", None)
-            work_items.append((idx, url, resolved, tpl))
+                if len(resolved_list) > 1:
+                    log(f"  Page has {len(resolved_list)} videos — queuing all of them", "info")
+            # A page URL that embeds several videos (e.g. an article carrying its
+            # own recap plus an interview) fans out into one work item per video.
+            for resolved in resolved_list:
+                idx += 1
+                tpl = "" if policy.gallery else build_output_template(
+                    idx, url, resolved, len(urls), pad
+                )
+                on_item(idx, url, "queued", None)
+                work_items.append((idx, url, resolved, tpl))
     finally:
         if worker_browser:
             try:
