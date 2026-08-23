@@ -234,7 +234,7 @@ class TestRunBatch(unittest.TestCase):
 
             def download(self, resolved, **kwargs):
                 self.calls += 1
-                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                kwargs["log"]("ERROR: Video unavailable", "error")
                 return False
 
         history = set()
@@ -247,7 +247,48 @@ class TestRunBatch(unittest.TestCase):
         self.assertNotIn("http://a/1", history)      # failures never recorded
         self.assertEqual(len(result.failures), 1)
         _idx, _url, failure = result.failures[0]
+        self.assertEqual(failure.reason, "removed")
+
+    def test_login_wall_gets_one_fallback_client_attempt_before_permanent(self):
+        # needs_cookies is special-cased in run_batch: the default client may
+        # have simply failed a bot-check, so it earns exactly one extra
+        # attempt with an alternate player_client before being declared
+        # permanent — unlike other permanent causes (see test above).
+        class _LoginWalledDownloader:
+            def __init__(self):
+                self.calls = 0
+                self.player_clients = []
+
+            def download(self, resolved, **kwargs):
+                self.calls += 1
+                self.player_clients.append(kwargs.get("player_client"))
+                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                return False
+
+        history = set()
+        dl = _LoginWalledDownloader()
+        result = self._run(["http://a/1"], history, dl)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(dl.calls, 2)                 # original + one fallback
+        self.assertIsNone(dl.player_clients[0])       # default client first
+        self.assertIsNotNone(dl.player_clients[1])    # fallback client second
+        _idx, _url, failure = result.failures[0]
         self.assertEqual(failure.reason, "needs_cookies")
+
+    def test_login_wall_fallback_success_counts_as_success(self):
+        class _RecoversOnFallback:
+            def download(self, resolved, **kwargs):
+                if kwargs.get("player_client"):
+                    kwargs["log"]("downloading…", "info")
+                    return True
+                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                return False
+
+        history = set()
+        result = self._run(["http://a/1"], history, _RecoversOnFallback())
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertIn("http://a/1", history)
 
     def test_on_item_reports_terminal_states(self):
         # The queue-table callback must see a terminal "done" for a success and

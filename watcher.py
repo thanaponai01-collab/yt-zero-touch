@@ -32,7 +32,7 @@ from ytdlp_skill import (
     check_disk_space, has_partial_files, check_dependencies,
     _KNOWN_DOMAINS, _print_log, URL_RE,
 )
-from orchestrator import download_with_retry, DownloadOutcome
+from orchestrator import download_with_retry, DownloadOutcome, LOGIN_WALL_FALLBACK_CLIENT
 
 # ---------------------------------------------------------------------------
 # URL detection — URL_RE comes from ytdlp_skill so the GUI and watcher don't drift.
@@ -84,21 +84,27 @@ def _download_worker(
     Shares the orchestrator's retry + permanent-error classification with the
     GUI so a fix to one reaches both.
     """
-    def download_fn(log, progress_hook):
-        return dl.download(
-            url,
-            out_dir=out_dir,
-            audio_only=audio_only,
-            gallery=gallery,
-            playlist=playlist,
-            write_metadata=True,
-            sub_langs=sub_langs,
-            sections=None if gallery else sections,
-            log=log,
-            progress_hook=progress_hook,
-        )
+    def _make_fn(player_client: "str | None" = None):
+        def download_fn(log, progress_hook):
+            return dl.download(
+                url,
+                out_dir=out_dir,
+                audio_only=audio_only,
+                gallery=gallery,
+                playlist=playlist,
+                write_metadata=True,
+                sub_langs=sub_langs,
+                sections=None if gallery else sections,
+                log=log,
+                progress_hook=progress_hook,
+                player_client=player_client,
+            )
+        return download_fn
 
-    return download_with_retry(download_fn, url=url, log=_print_log)
+    return download_with_retry(
+        _make_fn(), url=url, log=_print_log,
+        login_wall_fallback_fn=None if gallery else _make_fn(LOGIN_WALL_FALLBACK_CLIENT),
+    )
 
 
 def watch(

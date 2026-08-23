@@ -222,6 +222,7 @@ def download_with_retry(
     set_status: "Callable[[str], None]" = lambda *_: None,
     set_item: "Callable[[str, float | None], None]" = lambda *a: None,
     sleep: "Callable[[float], None]" = time.sleep,
+    login_wall_fallback_fn: "Callable[[LogFn, Callable[[dict], None]], bool] | None" = None,
 ) -> DownloadOutcome:
     """Run download_fn, retrying transient failures with backoff.
 
@@ -229,6 +230,13 @@ def download_with_retry(
     messages logged with tag "error" are captured and classified; a permanent
     failure short-circuits the retry loop. Returns a DownloadOutcome carrying
     the classified cause on failure (and truthy iff it succeeded).
+
+    login_wall_fallback_fn, if given, is tried exactly once — outside the
+    retry_max budget — the first time classify_failure calls "needs_cookies":
+    that message also fires when a valid session's default player client just
+    fails YouTube's bot-check, which a different client can clear without any
+    new cookies. Only if the fallback also comes back login-walled is the
+    failure reported as permanent.
 
     set_item(status, pct) is an optional per-row callback for a queue/progress
     table: status is one of "downloading"/"merging"/"retrying"/"failed", and pct
@@ -282,6 +290,15 @@ def download_with_retry(
 
         last_errors = captured_errors
         failure = classify_failure(captured_errors)
+
+        if (failure is _LOGIN and login_wall_fallback_fn is not None):
+            login_wall_fallback_fn, fallback_fn = None, login_wall_fallback_fn
+            base_log("  Login wall hit with the default client — trying an "
+                      "alternate player client before giving up…", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            failure = classify_failure(captured_errors)
+
         if failure and failure.permanent:
             base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
             set_item("failed", None)
@@ -305,7 +322,16 @@ def download_with_retry(
 # Batch runner
 # ---------------------------------------------------------------------------
 
-def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
+# Known-good client list from the 2026-05-13 PO-token incident (see logs.md):
+# no PO token required, and skips the "tv" client's DRM experiment. Used only
+# as a one-shot fallback when the default client just hit a login wall — not
+# pinned as the default, because that pin itself went stale (see the
+# extractor_args comment in ytdlp_skill.py's _download_api).
+LOGIN_WALL_FALLBACK_CLIENT = "tv_simply,android_vr,tv,web"
+
+
+def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str,
+                       player_client: "str | None" = None):
     """Bind a downloader call to (log, progress_hook) for download_with_retry."""
     def _fn(log: LogFn, progress_hook):
         return downloader.download(
@@ -325,6 +351,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
             log=log,
             progress_hook=progress_hook,
             pre_resolved=True,
+            player_client=player_client,
         )
     return _fn
 
@@ -425,6 +452,11 @@ def run_batch(
                 retry_max=policy.retry_max, retry_delays=policy.retry_delays,
                 url=url, idx=idx, log=log, set_status=set_status,
                 set_item=_item_cb(idx, url),
+                login_wall_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                       player_client=LOGIN_WALL_FALLBACK_CLIENT)
+                ),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
         }

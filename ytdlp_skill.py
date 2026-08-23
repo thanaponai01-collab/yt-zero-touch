@@ -490,6 +490,7 @@ def download(
     log: LogFn = _print_log,
     progress_hook: "Callable[[dict], None] | None" = None,
     pre_resolved: bool = False,
+    player_client: "str | None" = None,
     _browser=None,
 ) -> bool:
     """Download a single URL (or full playlist).
@@ -515,6 +516,9 @@ def download(
         progress_hook:  Optional yt-dlp progress_hook (called with dict containing
                         status/_percent_str/_speed_str/_eta_str/filename).
         pre_resolved:   If True, skip resolve_url() — caller already resolved.
+        player_client:  Override yt-dlp's youtube:player_client extractor arg,
+                         e.g. "tv_simply,android_vr,tv,web" — used to retry
+                         past a bot-check the default client just failed.
         _browser:       Pass an open Playwright browser to reuse (advanced).
 
     Returns:
@@ -573,7 +577,7 @@ def download(
     ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, cookie_file, browser_cookie, force, log, progress_hook,
-        sections=parsed_sections,
+        sections=parsed_sections, player_client=player_client,
     )
     # Auto-fallback: an Instagram/Twitter/… link that yt-dlp can't handle is
     # usually a photo or carousel — let gallery-dl take a turn before giving up.
@@ -597,6 +601,7 @@ def _download_api(
     log: LogFn = _print_log,
     extra_progress_hook: "Callable[[dict], None] | None" = None,
     sections: "list[tuple[float, float]] | None" = None,
+    player_client: "str | None" = None,
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -753,14 +758,20 @@ def _download_api(
         # Unrelated to the above: fragmented (DASH/HLS) downloads retry
         # per-fragment, so this budget really is per-fragment and 10 is fine.
         "fragment_retries":              10,
-        # ponytail: no player_client override — yt-dlp's built-in default
-        # (tv_simply/android_vr became erratic and now often serve only
-        # format 18/360p, see yt-dlp#16150) is actively retuned upstream as
-        # YouTube's PO-token requirements shift; pin a client list again only
-        # if a specific format (e.g. Shorts) breaks with the new default.
+        # ponytail: no player_client override by default — yt-dlp's built-in
+        # default (tv_simply/android_vr became erratic and now often serve
+        # only format 18/360p, see yt-dlp#16150) is actively retuned upstream
+        # as YouTube's PO-token requirements shift, so pinning one here would
+        # itself go stale. player_client is instead an explicit override
+        # (see download_with_retry's login-wall fallback in orchestrator.py),
+        # used only after the default has already failed a bot-check on this
+        # URL — the one case where a specific known-good client list
+        # (tv_simply,android_vr,tv,web — no PO token needed) is worth a shot.
         # generic:impersonate retries with browser impersonation on Cloudflare 403s.
         "extractor_args":                {
             "generic": {"impersonate": [""]},
+            **({"youtube": {"player_client": player_client.split(",")}}
+               if player_client else {}),
         },
         # Top-level option, not under extractor_args — lets yt-dlp fetch its
         # JS challenge-solver script from GitHub instead of npm.
@@ -893,6 +904,7 @@ class Downloader:
         log: "LogFn | None" = None,
         progress_hook: "Callable[[dict], None] | None" = None,
         pre_resolved: bool = False,
+        player_client: "str | None" = None,
     ) -> bool:
         """Same as module-level download(), but reuses the shared browser."""
         ck = cookie_file or self.cookie_file
@@ -915,6 +927,7 @@ class Downloader:
             log=log or self.log,
             progress_hook=progress_hook,
             pre_resolved=pre_resolved,
+            player_client=player_client,
             _browser=browser,
         )
 
