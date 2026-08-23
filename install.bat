@@ -48,7 +48,7 @@ python -m playwright install chromium
 if errorlevel 1 (
     echo.
     echo  [WARNING] Playwright browser install failed.
-    echo  Headless browser features (Outseta/Mux sites) will not work.
+    echo  Headless browser features ^(Outseta/Mux sites^) will not work.
     echo  You can retry later with:  python -m playwright install chromium
     echo.
 ) else (
@@ -103,7 +103,7 @@ if errorlevel 1 (
     echo  FFmpeg is required for merging video+audio and embedding thumbnails.
     echo.
     echo  Install options:
-    echo    Option A — winget (Windows 10/11 built-in):
+    echo    Option A — winget ^(Windows 10/11 built-in^):
     echo      winget install --id Gyan.FFmpeg -s winget
     echo.
     echo    Option B — Chocolatey:
@@ -122,7 +122,7 @@ if errorlevel 1 (
 :: ── Done ─────────────────────────────────────────────────────────────────────
 echo.
 echo  ============================================================
-echo    Setup complete!  Run the app with:  run.bat
+echo    Setup complete^^!  Run the app with:  run.bat
 echo  ============================================================
 echo.
 pause
