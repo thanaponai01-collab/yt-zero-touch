@@ -32,7 +32,10 @@ from ytdlp_skill import (
     check_disk_space, has_partial_files, check_dependencies,
     _KNOWN_DOMAINS, _print_log, URL_RE,
 )
-from orchestrator import download_with_retry, DownloadOutcome, LOGIN_WALL_FALLBACK_CLIENT
+from orchestrator import (
+    download_with_retry, DownloadOutcome,
+    LOGIN_WALL_FALLBACK_CLIENT, CLIENT_RETRY_FALLBACK_CLIENT,
+)
 
 # ---------------------------------------------------------------------------
 # URL detection — URL_RE comes from ytdlp_skill so the GUI and watcher don't drift.
@@ -104,6 +107,7 @@ def _download_worker(
     return download_with_retry(
         _make_fn(), url=url, log=_print_log,
         login_wall_fallback_fn=None if gallery else _make_fn(LOGIN_WALL_FALLBACK_CLIENT),
+        client_retry_fallback_fn=None if gallery else _make_fn(CLIENT_RETRY_FALLBACK_CLIENT),
     )
 
 

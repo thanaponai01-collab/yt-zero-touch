@@ -74,6 +74,22 @@ _UNVERIFIED = FailureClass(
     "The merged file isn't clean H.264 — check free disk space and that ffmpeg "
     "works, then retry this URL on its own.",
     permanent=True)
+# ffmpeg (used as external downloader for --download-sections cuts) reports a
+# CDN rejection (e.g. HTTP 403 on a stale/erratic-client URL — see the
+# player_client comment in ytdlp_skill.py) only as a raw process exit code;
+# its own stderr with the real reason inherits the console directly and never
+# reaches this app's logger (see ytdlp_skill.py's external_downloader_args
+# comment). A normal ffmpeg failure exits 0-255; anything larger is Windows
+# reporting an abnormal termination, which in practice here means "the URL
+# this client picked didn't work" — the same shape as _LOGIN's bot-check
+# case, so it gets the same one-shot alternate-client retry. Not permanent
+# (unlike _LOGIN): a fresh extraction, even on the same client, often lands a
+# working edge/URL next attempt, so normal retries should keep going if the
+# alternate client doesn't fix it either.
+_CLIENT_RETRY = FailureClass(
+    "client_served_bad_url", "Player client served an unreachable URL",
+    "Retrying with an alternate player client…",
+    permanent=False)
 
 
 # Ordered rules — first matching keyword wins, so more specific causes
@@ -108,6 +124,10 @@ _FAILURE_RULES: "list[tuple[FailureClass, list[str]]]" = [
 _HTTP_CODE_CAUSE = {"401": _LOGIN, "403": _LOGIN, "404": _REMOVED}
 _HTTP_CODE_RE = re.compile(r"\b(401|403|404)\b")
 
+# See _CLIENT_RETRY above: a normal ffmpeg exit is 0-255, so a larger reported
+# code is Windows' abnormal-termination value, not a real ffmpeg status.
+_FFMPEG_EXIT_RE = re.compile(r"ffmpeg exited with code (\d+)")
+
 
 def classify_failure(messages: list[str]) -> "FailureClass | None":
     """Classify captured error messages into a typed cause.
@@ -122,6 +142,9 @@ def classify_failure(messages: list[str]) -> "FailureClass | None":
     m = _HTTP_CODE_RE.search(combined)
     if m:
         return _HTTP_CODE_CAUSE[m.group(1)]
+    m = _FFMPEG_EXIT_RE.search(combined)
+    if m and int(m.group(1)) > 255:
+        return _CLIENT_RETRY
     return None
 
 
@@ -223,6 +246,7 @@ def download_with_retry(
     set_item: "Callable[[str, float | None], None]" = lambda *a: None,
     sleep: "Callable[[float], None]" = time.sleep,
     login_wall_fallback_fn: "Callable[[LogFn, Callable[[dict], None]], bool] | None" = None,
+    client_retry_fallback_fn: "Callable[[LogFn, Callable[[dict], None]], bool] | None" = None,
 ) -> DownloadOutcome:
     """Run download_fn, retrying transient failures with backoff.
 
@@ -237,6 +261,14 @@ def download_with_retry(
     fails YouTube's bot-check, which a different client can clear without any
     new cookies. Only if the fallback also comes back login-walled is the
     failure reported as permanent.
+
+    client_retry_fallback_fn is the analogous one-shot fallback for
+    _CLIENT_RETRY (a client served a format URL ffmpeg can't fetch — see
+    _CLIENT_RETRY's own comment). Kept separate from login_wall_fallback_fn
+    because the two need different client lists: the login-wall fallback
+    leans on android_vr specifically for its no-PO-token property, but
+    android_vr is also the documented source of the _CLIENT_RETRY failure
+    itself, so reusing it here would just fail the same way again.
 
     set_item(status, pct) is an optional per-row callback for a queue/progress
     table: status is one of "downloading"/"merging"/"retrying"/"failed", and pct
@@ -291,9 +323,16 @@ def download_with_retry(
         last_errors = captured_errors
         failure = classify_failure(captured_errors)
 
-        if (failure is _LOGIN and login_wall_fallback_fn is not None):
+        if failure is _LOGIN and login_wall_fallback_fn is not None:
             login_wall_fallback_fn, fallback_fn = None, login_wall_fallback_fn
-            base_log("  Login wall hit with the default client — trying an "
+            base_log(f"  {failure.label} with the default client — trying an "
+                      "alternate player client before giving up…", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            failure = classify_failure(captured_errors)
+        elif failure is _CLIENT_RETRY and client_retry_fallback_fn is not None:
+            client_retry_fallback_fn, fallback_fn = None, client_retry_fallback_fn
+            base_log(f"  {failure.label} with the default client — trying an "
                       "alternate player client before giving up…", "warn")
             if fallback_fn(log_capture, progress_hook):
                 return DownloadOutcome(ok=True)
@@ -328,6 +367,16 @@ def download_with_retry(
 # pinned as the default, because that pin itself went stale (see the
 # extractor_args comment in ytdlp_skill.py's _download_api).
 LOGIN_WALL_FALLBACK_CLIENT = "tv_simply,android_vr,tv,web"
+
+# _CLIENT_RETRY fallback: same idea, but android_vr deliberately dropped.
+# android_vr's format URLs are the confirmed source of that failure (see
+# _CLIENT_RETRY's comment) — ffmpeg (forced as external downloader by
+# --download-sections + force_keyframes_at_cuts) gets an HTTP 403 fetching
+# them, deterministically, every attempt. Verified 2026-08-27: with android_vr
+# in the list, yt-dlp still preferred its copy of itag 299 over tv_simply's
+# and reproduced the identical 403; dropping it entirely let extraction pick
+# a fetchable source for the same itag.
+CLIENT_RETRY_FALLBACK_CLIENT = "tv_simply,tv,web"
 
 
 def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str,
@@ -456,6 +505,11 @@ def run_batch(
                     None if policy.gallery else
                     _make_download_fn(downloader, policy, resolved, tpl,
                                        player_client=LOGIN_WALL_FALLBACK_CLIENT)
+                ),
+                client_retry_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                       player_client=CLIENT_RETRY_FALLBACK_CLIENT)
                 ),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
