@@ -99,6 +99,13 @@ def _find_deno() -> str | None:
 
 _DENO_PATH = _find_deno()
 
+# Default install path install.bat's bgutil-ytdlp-pot-provider step writes to
+# (see ADR-0004) — passed explicitly so the plugin's HTTP PO Token provider
+# knows script mode is in use and logs its always-failing localhost:4416
+# ping as expected info rather than a warning.
+_POT_SCRIPT_PATH = str(
+    Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js")
+
 # Quality presets, height-capped only. "format_sort" (ydl_opts) ranks by
 # resolution first and prefers H.264 *within* a resolution — so ≤1080p
 # output is unchanged (Premiere-native H.264) but 1440p/4K now actually
@@ -772,6 +779,11 @@ def _download_api(
             "generic": {"impersonate": [""]},
             **({"youtube": {"player_client": player_client.split(",")}}
                if player_client else {}),
+            # Tells the bgutil PO Token HTTP provider that script mode
+            # (ADR-0004) is in use, so its always-failing ping to the
+            # unused localhost:4416 server logs as an expected info line
+            # instead of a warning that looks like a real failure.
+            "youtubepot-bgutilscript": {"script_path": [_POT_SCRIPT_PATH]},
         },
         # Top-level option, not under extractor_args — lets yt-dlp fetch its
         # JS challenge-solver script from GitHub instead of npm.
