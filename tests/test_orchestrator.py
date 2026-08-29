@@ -85,6 +85,18 @@ class TestClassifyFailure(unittest.TestCase):
         fc = classify_failure(["This video is not available in your country"])
         self.assertEqual(fc.reason, "geo_blocked")
 
+    def test_ffmpeg_cdn_rejection_maps_to_client_retry_not_cookies(self):
+        # Regression: ffmpeg's own error text for a CDN-rejected section-trim
+        # URL contains a bare 403, but the generic phrase rule above used to
+        # win first and misclassify it as a login wall — a permanent failure
+        # that silently killed the d398925 alternate-client retry.
+        fc = classify_failure([
+            "[https @ 0x1eeb85789c0] HTTP error 403 Forbidden",
+            "Error opening input: Server returned 403 Forbidden (access denied)",
+        ])
+        self.assertEqual(fc.reason, "client_served_bad_url")
+        self.assertFalse(fc.permanent)
+
     def test_no_formats_suggests_update(self):
         fc = classify_failure(["ERROR: No video formats found"])
         self.assertEqual(fc.reason, "needs_update")
@@ -145,6 +157,37 @@ class TestDownloadWithRetry(unittest.TestCase):
         self.assertFalse(outcome.ok)
         self.assertEqual(len(calls), 3)   # initial + 2 retries
         self.assertIsNone(outcome.failure)
+
+    def test_client_retry_keeps_using_fallback_client_on_later_attempts(self):
+        # Regression: once the default client is confirmed broken (403), the
+        # one-shot fallback used to be spent on a single attempt and every
+        # later retry in the same loop reverted to the still-broken default
+        # client, burning the rest of the retry budget on a guaranteed 403.
+        default_calls = []
+        fallback_calls = []
+
+        def default_dl(log, hook):
+            default_calls.append(1)
+            log("Error opening input: Server returned 403 Forbidden", "error")
+            return False
+
+        def fallback_dl(log, hook):
+            fallback_calls.append(1)
+            # Fails for an unrelated, transient reason on its first use too —
+            # the loop should still keep using this client on later attempts
+            # rather than falling back to the confirmed-broken default.
+            if len(fallback_calls) == 1:
+                log("ERROR: connection reset by peer", "error")
+                return False
+            return True
+
+        outcome = download_with_retry(
+            default_dl, retry_max=3, retry_delays=(0, 0, 0), url="x",
+            sleep=lambda *_: None, client_retry_fallback_fn=fallback_dl,
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(len(default_calls), 1)   # default client tried exactly once
+        self.assertEqual(len(fallback_calls), 2)  # fallback used for every attempt after
 
 
 class TestBuildOutputTemplate(unittest.TestCase):

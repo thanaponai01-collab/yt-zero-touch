@@ -128,6 +128,15 @@ _HTTP_CODE_RE = re.compile(r"\b(401|403|404)\b")
 # code is Windows' abnormal-termination value, not a real ffmpeg status.
 _FFMPEG_EXIT_RE = re.compile(r"ffmpeg exited with code (\d+)")
 
+# ffmpeg's own CDN-rejection text for a section-trim's external downloader
+# ("Error opening input: Server returned 403 Forbidden") contains a bare 403,
+# which the generic phrase rule below reads as a login wall — a permanent
+# failure that stops retries dead. It isn't one: the player client's URL was
+# rejected by the CDN, not the account, and d398925's alternate-client
+# fallback exists specifically to retry it. Must be checked before
+# _FAILURE_RULES so the generic "http error 403" phrase can't win first.
+_FFMPEG_INPUT_ERROR_RE = re.compile(r"error opening input")
+
 
 def classify_failure(messages: list[str]) -> "FailureClass | None":
     """Classify captured error messages into a typed cause.
@@ -136,6 +145,8 @@ def classify_failure(messages: list[str]) -> "FailureClass | None":
     unclassified failure is treated as transient (retryable).
     """
     combined = " ".join(messages).lower()
+    if _FFMPEG_INPUT_ERROR_RE.search(combined) and _HTTP_CODE_RE.search(combined):
+        return _CLIENT_RETRY
     for failure, keywords in _FAILURE_RULES:
         if any(kw in combined for kw in keywords):
             return failure
@@ -336,6 +347,13 @@ def download_with_retry(
                       "alternate player client before giving up…", "warn")
             if fallback_fn(log_capture, progress_hook):
                 return DownloadOutcome(ok=True)
+            # The default client is confirmed broken (that's what _CLIENT_RETRY
+            # means) — keep using the alternate client for any remaining
+            # retries in this loop instead of reverting to a client that will
+            # 403 again every time. Whatever failed the fallback attempt
+            # itself (timeout, transient network blip, ...) is a different
+            # problem the normal retry/backoff below still handles.
+            download_fn = fallback_fn
             failure = classify_failure(captured_errors)
 
         if failure and failure.permanent:
