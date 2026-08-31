@@ -4,6 +4,7 @@ container, gate, and verification decisions for a downloaded file.
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -284,6 +285,38 @@ class TestH264EncoderSelection(unittest.TestCase):
             transcode_plan._h264_encoder()
             transcode_plan._h264_encoder()
             self.assertEqual(probe.call_count, 1)
+
+
+class TestMergeSessionVerify(unittest.TestCase):
+    """_MergeSession.verify() is the safety net ADR-0004 leans on to justify
+    trusting a truthy DownloadOutcome unconditionally — so a merge that
+    reports "finished" for a file that then isn't on disk must fail, not pass
+    with a warning nobody in a zero-touch pipeline will read."""
+
+    def setUp(self):
+        self.messages = []
+        self.session = transcode_plan.merge_session(
+            lambda msg, tag="info": self.messages.append((tag, msg)),
+            container="mp4",
+        )
+
+    def test_fails_when_the_recorded_merged_file_is_missing(self):
+        self.session.merge_finished("C:/does/not/exist.mp4")
+        self.assertFalse(self.session.verify())
+        self.assertTrue(
+            any("output verification failed" in msg.lower()
+                for _, msg in self.messages),
+            "missing output must log a message classify_failure recognizes "
+            "as the permanent _UNVERIFIED failure, not a transient one",
+        )
+
+    def test_passes_for_an_existing_verified_file(self):
+        with mock.patch.object(transcode_plan, "verify_h264_output", return_value=True):
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "clip.mp4"
+                path.write_bytes(b"x")
+                self.session.merge_finished(str(path))
+                self.assertTrue(self.session.verify())
 
 
 class TestVerifyH264Output(unittest.TestCase):
