@@ -412,9 +412,10 @@ class _MergeSession:
         ok = True
         for path in self._finished:
             if not Path(path).exists():
-                self._log(f"  Could not locate merged output for verification "
-                          f"({Path(path).name}) — check the file manually "
-                          f"before importing.", "warn")
+                self._log(f"  Output verification failed: merged file is "
+                          f"missing on disk ({Path(path).name}) — marking "
+                          f"this download failed.", "error")
+                ok = False
                 continue
             if not verify_h264_output(path, self._log):
                 ok = False
