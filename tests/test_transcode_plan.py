@@ -35,6 +35,23 @@ class TestContainerFor(unittest.TestCase):
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", False):
             self.assertEqual(transcode_plan.container_for(audio_only=False), "mp4/mkv")
 
+    def test_prores_target_forces_mov(self):
+        # Unlike mp4/H.264, this doesn't depend on TRANSCODE_TO_H264 — a
+        # ProRes merge always re-encodes, so there's no source-codec
+        # prediction to get wrong.
+        for flag in (False, True):
+            with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", flag):
+                self.assertEqual(
+                    transcode_plan.container_for(audio_only=False, target_codec="prores"),
+                    "mov",
+                )
+
+    def test_prores_target_is_still_opus_for_audio_only(self):
+        self.assertEqual(
+            transcode_plan.container_for(audio_only=True, target_codec="prores"),
+            "opus",
+        )
+
 
 class GateFreeAfterTest:
     """Fails the test that leaked the process-wide transcode gate, by name,
@@ -215,6 +232,55 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
         self.assertIsNone(plan.log_message)
 
 
+class TestPlanTranscodeProres(GateFreeAfterTest, unittest.TestCase):
+    """target_codec="prores" — the opt-in ProRes 422 Proxy merge target.
+    Unlike H.264, it has no copy branch: any source, including one that's
+    already H.264, gets a full re-encode."""
+
+    def test_h264_source_still_transcodes(self):
+        # The one behavioural difference from the H.264 target: even a
+        # source that would stream-copy there must re-encode here, since
+        # H.264 bytes can never be copied into a ProRes-legal file.
+        plan = transcode_plan.plan_transcode(
+            "avc1.640028", "mp4a.40.2", target_codec="prores")
+        self.assertEqual(plan.merge_args[:2], ["-c:v", "prores_ks"])
+        self.assertEqual(plan.codec_case, "h264")
+
+    def test_merge_args_use_the_proxy_profile(self):
+        plan = transcode_plan.plan_transcode("vp9", "opus", target_codec="prores")
+        self.assertEqual(plan.merge_args[:8], transcode_plan._PRORES_PROXY_ARGS)
+
+    def test_aac_audio_still_copies(self):
+        plan = transcode_plan.plan_transcode(
+            "vp9", "mp4a.40.2", target_codec="prores")
+        self.assertNotIn("-c:a", plan.merge_args)
+
+    def test_non_aac_audio_still_transcodes(self):
+        plan = transcode_plan.plan_transcode("vp9", "opus", target_codec="prores")
+        self.assertIn("-c:a", plan.merge_args)
+        self.assertIn("aac", plan.merge_args)
+
+    def test_needs_gate(self):
+        # prores_ks is a software encoder like libx264 — no GPU path is
+        # wired up for it, so concurrent encodes must be serialized the
+        # same way.
+        plan = transcode_plan.plan_transcode("vp9", "opus", target_codec="prores")
+        self.assertTrue(plan.needs_gate)
+
+    def test_log_message_for_known_codec(self):
+        plan = transcode_plan.plan_transcode("vp9", "opus", target_codec="prores")
+        self.assertIsNotNone(plan.log_message)
+        self.assertIn("ProRes 422 Proxy", plan.log_message)
+        self.assertEqual(plan.log_level, "info")
+
+    def test_unreadable_codec_transcodes_and_warns_without_claiming_a_guess(self):
+        plan = transcode_plan.plan_transcode("", "opus", target_codec="prores")
+        self.assertEqual(plan.codec_case, "unknown")
+        self.assertEqual(plan.merge_args[:2], ["-c:v", "prores_ks"])
+        self.assertEqual(plan.log_level, "warn")
+        self.assertIn("Could not determine", plan.log_message)
+
+
 class TestMergeSessionGate(GateFreeAfterTest, unittest.TestCase):
     """Unit-level gate behaviour. The lifecycle sequences that matter — a
     crashed merge, a playlist's second merge — are driven through the real
@@ -319,6 +385,37 @@ class TestMergeSessionVerify(unittest.TestCase):
                 self.assertTrue(self.session.verify())
 
 
+class TestMergeSessionVerifyProres(unittest.TestCase):
+    """A "mov" container commits to ProRes the same way "mp4" commits to
+    H.264 — same mechanism (_CONTAINER_COMMITMENTS), different codec."""
+
+    def setUp(self):
+        self.messages = []
+        self.session = transcode_plan.merge_session(
+            lambda msg, tag="info": self.messages.append((tag, msg)),
+            container="mov",
+        )
+
+    def test_checks_prores_not_h264(self):
+        with mock.patch.object(transcode_plan, "verify_h264_output") as h264_verify, \
+             mock.patch.object(transcode_plan, "verify_prores_output", return_value=True) as prores_verify:
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "clip.mov"
+                path.write_bytes(b"x")
+                self.session.merge_finished(str(path))
+                self.assertTrue(self.session.verify())
+        prores_verify.assert_called_once()
+        h264_verify.assert_not_called()
+
+    def test_fails_when_prores_check_fails(self):
+        with mock.patch.object(transcode_plan, "verify_prores_output", return_value=False):
+            with tempfile.TemporaryDirectory() as d:
+                path = Path(d) / "clip.mov"
+                path.write_bytes(b"x")
+                self.session.merge_finished(str(path))
+                self.assertFalse(self.session.verify())
+
+
 class TestVerifyH264Output(unittest.TestCase):
     def _fake_run(self, returncode, stdout):
         completed = mock.Mock(returncode=returncode, stdout=stdout)
@@ -357,6 +454,32 @@ class TestVerifyH264Output(unittest.TestCase):
         with self._fake_run(0, "h264,\n"):
             self.assertTrue(
                 transcode_plan.verify_h264_output("out.mp4", lambda *a, **k: None)
+            )
+
+
+class TestVerifyProresOutput(unittest.TestCase):
+    def _fake_run(self, returncode, stdout):
+        completed = mock.Mock(returncode=returncode, stdout=stdout)
+        return mock.patch.object(
+            transcode_plan.subprocess, "run", return_value=completed
+        )
+
+    def test_passes_for_prores_stream(self):
+        # ffprobe reports every ProRes profile — Proxy included — as
+        # codec_name "prores"; the profile isn't distinguished in the stream.
+        with self._fake_run(0, "prores\n"):
+            self.assertTrue(
+                transcode_plan.verify_prores_output("out.mov", lambda *a, **k: None)
+            )
+
+    def test_fails_for_wrong_or_unreadable_codec(self):
+        with self._fake_run(0, "h264\n"):
+            self.assertFalse(
+                transcode_plan.verify_prores_output("out.mov", lambda *a, **k: None)
+            )
+        with self._fake_run(1, ""):
+            self.assertFalse(
+                transcode_plan.verify_prores_output("out.mov", lambda *a, **k: None)
             )
 
 

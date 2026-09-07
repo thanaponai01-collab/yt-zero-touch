@@ -77,6 +77,7 @@ def _download_worker(
     sub_langs: list[str],
     gallery: bool = False,
     sections: "str | None" = None,
+    target_codec: str = "h264",
 ) -> DownloadOutcome:
     """Run in a thread — returns a DownloadOutcome (truthy on success, carrying
     the classified failure cause otherwise).
@@ -94,6 +95,7 @@ def _download_worker(
             write_metadata=True,
             sub_langs=sub_langs,
             sections=None if gallery else sections,
+            target_codec=target_codec,
             log=log,
             progress_hook=progress_hook,
         )
@@ -151,6 +153,7 @@ def watch(
     sub_langs: list[str] | None = None,
     gallery: bool = False,
     sections: "str | None" = None,
+    target_codec: str = "h264",
 ):
     sub_langs = sub_langs or []
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -183,7 +186,9 @@ def watch(
     print(f"  URL file    : {url_file.resolve()}")
     print(f"  Output      : {out_dir.resolve()}")
     _mode = "Photos (gallery-dl)" if gallery else (
-        "Audio only" if audio_only else "H.264 video + audio")
+        "Audio only" if audio_only else
+        ("ProRes 422 Proxy video + audio" if target_codec == "prores"
+         else "H.264 video + audio"))
     print(f"  Mode        : {_mode}")
     print(f"  Playlist    : {'yes' if playlist else 'no (single video)'}")
     print(f"  Subtitles   : {', '.join(sub_langs) if sub_langs else 'none'}")
@@ -246,7 +251,7 @@ def watch(
 
                             future = executor.submit(
                                 _download_worker, dl, url, out_dir, audio_only,
-                                playlist, sub_langs, gallery, sections,
+                                playlist, sub_langs, gallery, sections, target_codec,
                             )
                             in_flight[url] = future
 
@@ -338,6 +343,13 @@ def main():
         help="Trim to a time range, e.g. 10:00-20:00 (applies to every URL; "
              "ignored for playlists and --photos)",
     )
+    parser.add_argument(
+        "--prores",
+        action="store_true",
+        help="Merge to ProRes 422 Proxy (.mov) instead of H.264 (.mp4) — "
+             "edit-friendly (every frame intra-coded), but much larger files "
+             "and every merge re-encodes (no stream-copy fast path)",
+    )
     args = parser.parse_args()
     cfile = Path(args.cookies) if args.cookies else None
     sub_langs = [s.strip() for s in args.sub_langs.split(",")] if args.sub_langs else []
@@ -352,6 +364,7 @@ def main():
         sub_langs=sub_langs,
         gallery=args.photos,
         sections=args.sections,
+        target_codec="prores" if args.prores else "h264",
     )
 
 

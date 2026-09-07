@@ -487,6 +487,7 @@ def download(
     fmt: "str | None" = None,
     out_template: "str | None" = None,
     sections: "str | None" = None,
+    target_codec: str = "h264",
     log: LogFn = _print_log,
     progress_hook: "Callable[[dict], None] | None" = None,
     pre_resolved: bool = False,
@@ -511,6 +512,9 @@ def download(
         out_template:   Override yt-dlp -o template (relative to out_dir).
         sections:       Time-range spec to trim to, e.g. "10:00-20:00" (video/audio
                         only; ignored for playlists and gallery downloads).
+        target_codec:   Merge target — "h264" (default, small/Premiere-native) or
+                        "prores" (ProRes 422 Proxy, edit-friendly but much larger;
+                        see transcode_plan.TargetCodec). Ignored for audio_only.
         log:            Callable(msg, tag) for progress output.
         progress_hook:  Optional yt-dlp progress_hook (called with dict containing
                         status/_percent_str/_speed_str/_eta_str/filename).
@@ -573,7 +577,7 @@ def download(
     ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, cookie_file, browser_cookie, force, log, progress_hook,
-        sections=parsed_sections,
+        sections=parsed_sections, target_codec=target_codec,
     )
     # Auto-fallback: an Instagram/Twitter/… link that yt-dlp can't handle is
     # usually a photo or carousel — let gallery-dl take a turn before giving up.
@@ -597,6 +601,7 @@ def _download_api(
     log: LogFn = _print_log,
     extra_progress_hook: "Callable[[dict], None] | None" = None,
     sections: "list[tuple[float, float]] | None" = None,
+    target_codec: str = "h264",
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -656,7 +661,7 @@ def _download_api(
     # YoutubeDL() reads merge_output_format at construction — see
     # transcode_plan.container_for. The session is handed the same value so it
     # can collect on that commitment after the download.
-    container = transcode_plan.container_for(audio_only)
+    container = transcode_plan.container_for(audio_only, target_codec)
 
     # Owns the merge lifecycle for this download — the transcode gate, the
     # merged files, and their verification. Entered around the download call
@@ -688,7 +693,7 @@ def _download_api(
         audio_fmt = next((f for f in formats if f.get("acodec") not in (None, "none")), None)
         vcodec = ((video_fmt or {}).get("vcodec") or "").lower()
         acodec = ((audio_fmt or {}).get("acodec") or "").lower()
-        plan = transcode_plan.plan_transcode(vcodec, acodec)
+        plan = transcode_plan.plan_transcode(vcodec, acodec, target_codec)
         if plan.log_message:
             log(plan.log_message, plan.log_level)
         # The merger reads info["filepath"] as its output path before it runs
@@ -890,6 +895,7 @@ class Downloader:
         fmt: "str | None" = None,
         out_template: "str | None" = None,
         sections: "str | None" = None,
+        target_codec: str = "h264",
         log: "LogFn | None" = None,
         progress_hook: "Callable[[dict], None] | None" = None,
         pre_resolved: bool = False,
@@ -912,6 +918,7 @@ class Downloader:
             fmt=fmt,
             out_template=out_template,
             sections=sections,
+            target_codec=target_codec,
             log=log or self.log,
             progress_hook=progress_hook,
             pre_resolved=pre_resolved,

@@ -100,6 +100,7 @@ class App(tk.Tk):
         self.force_redl       = tk.BooleanVar(value=False)
         self.sections         = tk.StringVar(value="")
         self.watch_clip       = tk.BooleanVar(value=False)
+        self.prores_proxy     = tk.BooleanVar(value=False)
 
         self.downloading   = False
         self._updating     = False
@@ -167,6 +168,7 @@ class App(tk.Tk):
             "sub_th":          self.sub_th.set,
             "sections":        self.sections.set,
             "watch_clip":      self.watch_clip.set,
+            "prores_proxy":    self.prores_proxy.set,
         }
         for key, setter in setters.items():
             if key in data and data[key] is not None:
@@ -186,6 +188,7 @@ class App(tk.Tk):
             "sub_th":          self.sub_th.get(),
             "sections":        self.sections.get(),
             "watch_clip":      self.watch_clip.get(),
+            "prores_proxy":    self.prores_proxy.get(),
         }
         try:
             SETTINGS_F.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -353,6 +356,7 @@ class App(tk.Tk):
                       highlightthickness=0, bd=0)
         q_menu["menu"].config(bg=COLORS["accent2"], fg=COLORS["text"])
         q_menu.pack(side="left")
+        _ck(q_frame, "ProRes Proxy", self.prores_proxy).pack(side="left", padx=(8, 0))
 
         tk.Label(opts, text="Subtitles:", bg=COLORS["panel"],
                  fg=COLORS["muted"], font=("Segoe UI", 8)).grid(row=0, column=1, sticky="w")
@@ -677,6 +681,7 @@ class App(tk.Tk):
             force=self.force_redl.get(),
             write_metadata=False,
             sections=None if gallery else sections,
+            target_codec="prores" if self.prores_proxy.get() else "h264",
             max_workers=MAX_WORKERS,
         )
         if sections and gallery:
