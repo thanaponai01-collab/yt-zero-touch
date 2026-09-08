@@ -17,10 +17,13 @@ import unittest
 from concurrent.futures import Future
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import watcher  # noqa: E402
-from orchestrator import DownloadOutcome, FailureClass  # noqa: E402
+from yt_zero_touch.ui.cli import watcher  # noqa: E402
+from yt_zero_touch.services.orchestrator import (  # noqa: E402
+    DownloadOutcome,
+    FailureClass,
+)
 
 
 def _settled(value) -> Future:

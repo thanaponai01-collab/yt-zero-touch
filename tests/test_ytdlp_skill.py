@@ -13,12 +13,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import ytdlp_skill  # noqa: E402
-import transcode_plan  # noqa: E402
-import format_policy  # noqa: E402
-from ytdlp_skill import is_image_host  # noqa: E402
+from yt_zero_touch.engines import ytdlp_engine as ytdlp_skill  # noqa: E402
+from yt_zero_touch.core.models import QUALITY_PRESETS  # noqa: E402
+from yt_zero_touch.core import transcode as transcode_plan  # noqa: E402
+from yt_zero_touch.core import format_policy  # noqa: E402
+from yt_zero_touch.core.models import is_image_host  # noqa: E402
 
 
 class TestIsImageHost(unittest.TestCase):
@@ -55,49 +56,49 @@ class TestGalleryRouting(unittest.TestCase):
     def test_photos_mode_uses_gallery_dl_and_skips_resolve(self):
         # gallery=True must hand the raw URL to gallery-dl without resolving a
         # stream (no browser) and without touching yt-dlp.
-        with mock.patch.object(ytdlp_skill, "_download_gallery", return_value=True) as mg, \
+        with mock.patch.object(ytdlp_skill, "download_gallery", return_value=True) as mg, \
              mock.patch.object(ytdlp_skill, "resolve_url",
                                side_effect=AssertionError("must not resolve in Photos mode")), \
              mock.patch.object(ytdlp_skill, "_download_api",
                                side_effect=AssertionError("must not call yt-dlp in Photos mode")):
-            ok = ytdlp_skill.download(
+            ok = ytdlp_skill.download_ytdlp(
                 "https://instagram.com/p/abc", out_dir=self.tmp, gallery=True,
             )
         self.assertTrue(ok)
         mg.assert_called_once()
 
     def test_image_host_falls_back_to_gallery_when_ytdlp_finds_nothing(self):
-        with mock.patch.object(ytdlp_skill, "_YT_DLP_API_OK", True), \
-             mock.patch.object(ytdlp_skill, "_GALLERY_DL_OK", True), \
+        with mock.patch.object(ytdlp_skill, "YT_DLP_API_OK", True), \
+             mock.patch.object(ytdlp_skill, "GALLERY_DL_OK", True), \
              mock.patch.object(ytdlp_skill, "resolve_url",
                                return_value="https://instagram.com/p/abc"), \
              mock.patch.object(ytdlp_skill, "_download_api", return_value=False), \
-             mock.patch.object(ytdlp_skill, "_download_gallery", return_value=True) as mg:
-            ok = ytdlp_skill.download("https://instagram.com/p/abc", out_dir=self.tmp)
+             mock.patch.object(ytdlp_skill, "download_gallery", return_value=True) as mg:
+            ok = ytdlp_skill.download_ytdlp("https://instagram.com/p/abc", out_dir=self.tmp)
         self.assertTrue(ok)
         mg.assert_called_once()
 
     def test_no_gallery_fallback_for_video_host(self):
-        with mock.patch.object(ytdlp_skill, "_YT_DLP_API_OK", True), \
-             mock.patch.object(ytdlp_skill, "_GALLERY_DL_OK", True), \
+        with mock.patch.object(ytdlp_skill, "YT_DLP_API_OK", True), \
+             mock.patch.object(ytdlp_skill, "GALLERY_DL_OK", True), \
              mock.patch.object(ytdlp_skill, "resolve_url",
                                return_value="https://youtube.com/watch?v=abc"), \
              mock.patch.object(ytdlp_skill, "_download_api", return_value=False), \
-             mock.patch.object(ytdlp_skill, "_download_gallery") as mg:
-            ok = ytdlp_skill.download("https://youtube.com/watch?v=abc", out_dir=self.tmp)
+             mock.patch.object(ytdlp_skill, "download_gallery") as mg:
+            ok = ytdlp_skill.download_ytdlp("https://youtube.com/watch?v=abc", out_dir=self.tmp)
         self.assertFalse(ok)
         mg.assert_not_called()
 
     def test_no_gallery_fallback_for_audio_only(self):
         # Audio-only on an image host should not fall back to gallery-dl —
         # there's no audio in a photo.
-        with mock.patch.object(ytdlp_skill, "_YT_DLP_API_OK", True), \
-             mock.patch.object(ytdlp_skill, "_GALLERY_DL_OK", True), \
+        with mock.patch.object(ytdlp_skill, "YT_DLP_API_OK", True), \
+             mock.patch.object(ytdlp_skill, "GALLERY_DL_OK", True), \
              mock.patch.object(ytdlp_skill, "resolve_url",
                                return_value="https://instagram.com/p/abc"), \
              mock.patch.object(ytdlp_skill, "_download_api", return_value=False), \
-             mock.patch.object(ytdlp_skill, "_download_gallery") as mg:
-            ok = ytdlp_skill.download(
+             mock.patch.object(ytdlp_skill, "download_gallery") as mg:
+            ok = ytdlp_skill.download_ytdlp(
                 "https://instagram.com/p/abc", out_dir=self.tmp, audio_only=True,
             )
         self.assertFalse(ok)
@@ -230,7 +231,7 @@ class TestDownloadApiOptions(DownloadApiHarness):
 
     def test_no_codec_filters_in_default_format(self):
         self.assertEqual(ytdlp_skill.FORMAT_VIDEO, "bestvideo+bestaudio/best")
-        for preset in ytdlp_skill.QUALITY_PRESETS.values():
+        for preset in QUALITY_PRESETS.values():
             self.assertNotIn("vcodec", preset)
             self.assertNotIn("ext=m4a", preset)
 
@@ -425,16 +426,16 @@ class TestOutputVerification(DownloadApiHarness):
 
 class TestParseSections(unittest.TestCase):
     def test_basic_range(self):
-        from ytdlp_skill import parse_sections
+        from yt_zero_touch.core.models import parse_sections
         self.assertEqual(parse_sections("10:00-20:00"), [(600.0, 1200.0)])
 
     def test_leading_star_and_seconds(self):
-        from ytdlp_skill import parse_sections
+        from yt_zero_touch.core.models import parse_sections
         self.assertEqual(parse_sections("*00:10-01:30"), [(10.0, 90.0)])
         self.assertEqual(parse_sections("90-120"), [(90.0, 120.0)])
 
     def test_hms_and_multiple(self):
-        from ytdlp_skill import parse_sections
+        from yt_zero_touch.core.models import parse_sections
         self.assertEqual(parse_sections("1:02:03-1:02:10"), [(3723.0, 3730.0)])
         self.assertEqual(
             parse_sections("0:30-1:00, 2:00-2:30"),
@@ -442,7 +443,7 @@ class TestParseSections(unittest.TestCase):
         )
 
     def test_invalid_returns_none(self):
-        from ytdlp_skill import parse_sections
+        from yt_zero_touch.core.models import parse_sections
         for bad in ("", None, "bad", "20:00-10:00", "5-5", "nope-nope"):
             self.assertIsNone(parse_sections(bad), bad)
 

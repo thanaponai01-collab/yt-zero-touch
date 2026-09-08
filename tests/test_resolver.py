@@ -7,9 +7,12 @@ fetch and the headless-browser fallback are deliberately not touched.
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from resolver import _brightcove_from_html, _brightcove_all_from_html  # noqa: E402
+from yt_zero_touch.services.resolver import (  # noqa: E402
+    _brightcove_from_html,
+    _brightcove_all_from_html,
+)
 
 F1_ACCOUNT = "6057949432001"
 VIDEO_ID = "1709982240646065581"

@@ -30,7 +30,7 @@ Zero-touch video/photo downloading pipeline for Windows editors producing Premie
         │
         ▼
 [Core Domain & Invariants]
-  ├── Transcode & Gate (yt_zero_touch.core.transcode) — ADR-0001, ADR-0002, ADR-0003, ADR-0005
+  ├── Transcode & Gate (yt_zero_touch.core.transcode) — ADR-0001, ADR-0002, ADR-0003, ADR-0006
   ├── Format Sort Policy (yt_zero_touch.core.format_policy)
   ├── Failure Classifier (yt_zero_touch.core.failures)
   ├── History Store (yt_zero_touch.core.history)

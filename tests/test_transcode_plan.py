@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import transcode_plan  # noqa: E402
+from yt_zero_touch.core import transcode as transcode_plan  # noqa: E402
 
 
 class TestTranscodeToH264Default(unittest.TestCase):

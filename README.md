@@ -134,12 +134,15 @@ The CLI watcher has the same capability via `python watcher.py --photos`.
 
 ```
 yt-zero-touch/
-├── app.py            # Tkinter GUI (thin — collects inputs, renders callbacks)
-├── orchestrator.py   # UI-free batch runner: resolve, concurrency, retry, history
-├── ytdlp_skill.py    # Generic, reusable yt-dlp download engine
-├── resolver.py       # Site-specific URL resolution (F1/Brightcove/headless browser)
-├── watcher.py        # Alternative CLI front-end: watch urls.txt
-├── tests/            # Unit tests for the orchestrator logic
+├── app.py            # Entrypoint shim -> yt_zero_touch.ui.app
+├── watcher.py        # Entrypoint shim -> yt_zero_touch.ui.cli.watcher
+├── src/yt_zero_touch/
+│   ├── ui/           # Tkinter GUI, CLI watcher, theme and view state
+│   ├── services/     # Batch orchestrator, URL resolver, updater, system probes
+│   ├── engines/      # yt-dlp, gallery-dl and Google Drive download adapters
+│   └── core/         # Transcode gate, failure classifier, history, config, models
+├── tests/            # Unit tests
+├── docs/adr/         # Architecture decision records
 ├── requirements.txt  # Python dependencies
 ├── install.bat       # First-time setup
 ├── run.bat           # Launch the app

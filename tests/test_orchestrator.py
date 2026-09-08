@@ -13,9 +13,9 @@ import threading
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from orchestrator import (  # noqa: E402
+from yt_zero_touch.services.orchestrator import (  # noqa: E402
     is_permanent_error,
     classify_failure,
     download_with_retry,

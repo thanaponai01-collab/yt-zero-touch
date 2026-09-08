@@ -7,9 +7,9 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import format_policy  # noqa: E402
+from yt_zero_touch.core import format_policy  # noqa: E402
 
 
 class TestFormatSortComposition(unittest.TestCase):
