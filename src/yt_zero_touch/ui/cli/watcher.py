@@ -17,7 +17,12 @@ from pathlib import Path
 from yt_zero_touch.core.history import HistoryStore, load_history, save_history
 from yt_zero_touch.core.models import URL_RE
 from yt_zero_touch.engines.ytdlp_engine import Downloader
-from yt_zero_touch.services.orchestrator import DownloadOutcome, download_with_retry
+from yt_zero_touch.services.orchestrator import (
+    CLIENT_RETRY_FALLBACK_CLIENT,
+    LOGIN_WALL_FALLBACK_CLIENT,
+    DownloadOutcome,
+    download_with_retry,
+)
 from yt_zero_touch.services.resolver import _KNOWN_DOMAINS, _print_log
 from yt_zero_touch.services.system import check_dependencies, check_disk_space
 
@@ -57,22 +62,29 @@ def _download_worker(
     sections: str | None = None,
     target_codec: str = "h264",
 ) -> DownloadOutcome:
-    def download_fn(log, progress_hook):
-        return dl.download(
-            url,
-            out_dir=out_dir,
-            audio_only=audio_only,
-            gallery=gallery,
-            playlist=playlist,
-            write_metadata=True,
-            sub_langs=sub_langs,
-            sections=None if gallery else sections,
-            target_codec=target_codec,
-            log=log,
-            progress_hook=progress_hook,
-        )
+    def _make_fn(player_client: str | None = None):
+        def download_fn(log, progress_hook):
+            return dl.download(
+                url,
+                out_dir=out_dir,
+                audio_only=audio_only,
+                gallery=gallery,
+                playlist=playlist,
+                write_metadata=True,
+                sub_langs=sub_langs,
+                sections=None if gallery else sections,
+                target_codec=target_codec,
+                log=log,
+                progress_hook=progress_hook,
+                player_client=player_client,
+            )
+        return download_fn
 
-    return download_with_retry(download_fn, url=url, log=_print_log)
+    return download_with_retry(
+        _make_fn(), url=url, log=_print_log,
+        login_wall_fallback_fn=None if gallery else _make_fn(LOGIN_WALL_FALLBACK_CLIENT),
+        client_retry_fallback_fn=None if gallery else _make_fn(CLIENT_RETRY_FALLBACK_CLIENT),
+    )
 
 
 def _harvest_completed(

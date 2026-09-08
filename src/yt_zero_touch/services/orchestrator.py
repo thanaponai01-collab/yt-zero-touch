@@ -13,7 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from yt_zero_touch.core.failures import FailureClass, classify_failure, is_permanent_error
+from yt_zero_touch.core.failures import (
+    _CLIENT_RETRY,
+    _LOGIN,
+    FailureClass,
+    classify_failure,
+    is_permanent_error,
+)
 from yt_zero_touch.core.history import HistoryStore, save_history
 from yt_zero_touch.core.models import (
     BatchPolicy,
@@ -27,6 +33,7 @@ from yt_zero_touch.services.resolver import (
     _launch_temp_browser,
     _print_log,
     resolve_url,
+    resolve_urls,
 )
 
 _DEFAULT_RETRY_MAX = 3
@@ -44,8 +51,26 @@ def download_with_retry(
     set_status: Callable[[str], None] = lambda *_: None,
     set_item: Callable[[str, float | None], None] = lambda *a: None,
     sleep: Callable[[float], None] = time.sleep,
+    login_wall_fallback_fn: Callable[[LogFn, Callable[[dict], None]], bool] | None = None,
+    client_retry_fallback_fn: Callable[[LogFn, Callable[[dict], None]], bool] | None = None,
 ) -> DownloadOutcome:
-    """Run download_fn, retrying transient failures with backoff."""
+    """Run download_fn, retrying transient failures with backoff.
+
+    login_wall_fallback_fn, if given, is tried exactly once - outside the
+    retry_max budget - the first time classify_failure calls "needs_cookies":
+    that message also fires when a valid session's default player client just
+    fails YouTube's bot-check, which a different client can clear without any
+    new cookies. Only if the fallback also comes back login-walled is the
+    failure reported as permanent.
+
+    client_retry_fallback_fn is the analogous one-shot fallback for
+    _CLIENT_RETRY (a client served a format URL ffmpeg can't fetch - see
+    _CLIENT_RETRY's own comment). Kept separate from login_wall_fallback_fn
+    because the two need different client lists: the login-wall fallback
+    leans on android_vr specifically for its no-PO-token property, but
+    android_vr is also the documented source of the _CLIENT_RETRY failure
+    itself, so reusing it here would just fail the same way again.
+    """
     prefix = f"[#{idx}] " if idx is not None else ""
 
     def base_log(msg: str, tag: str = "info"):
@@ -93,6 +118,29 @@ def download_with_retry(
 
         last_errors = captured_errors
         failure = classify_failure(captured_errors)
+
+        if failure is _LOGIN and login_wall_fallback_fn is not None:
+            login_wall_fallback_fn, fallback_fn = None, login_wall_fallback_fn
+            base_log(f"  {failure.label} with the default client - trying an "
+                     "alternate player client before giving up...", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            failure = classify_failure(captured_errors)
+        elif failure is _CLIENT_RETRY and client_retry_fallback_fn is not None:
+            client_retry_fallback_fn, fallback_fn = None, client_retry_fallback_fn
+            base_log(f"  {failure.label} with the default client - trying an "
+                     "alternate player client before giving up...", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            # The default client is confirmed broken (that's what _CLIENT_RETRY
+            # means) - keep using the alternate client for any remaining
+            # retries in this loop instead of reverting to a client that will
+            # 403 again every time. Whatever failed the fallback attempt
+            # itself (timeout, transient network blip, ...) is a different
+            # problem the normal retry/backoff below still handles.
+            download_fn = fallback_fn
+            failure = classify_failure(captured_errors)
+
         if failure and failure.permanent:
             base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
             set_item("failed", None)
@@ -112,7 +160,26 @@ def download_with_retry(
     return DownloadOutcome(ok=False, failure=classify_failure(last_errors))
 
 
-def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
+# Known-good client list from the 2026-05-13 PO-token incident (see logs.md):
+# no PO token required, and skips the "tv" client's DRM experiment. Used only
+# as a one-shot fallback when the default client just hit a login wall - not
+# pinned as the default, because that pin itself went stale (see the
+# extractor_args comment in engines/ytdlp_engine.py's _download_api).
+LOGIN_WALL_FALLBACK_CLIENT = "tv_simply,android_vr,tv,web"
+
+# _CLIENT_RETRY fallback: same idea, but android_vr deliberately dropped.
+# android_vr's format URLs are the confirmed source of that failure (see
+# _CLIENT_RETRY's comment) - ffmpeg (forced as external downloader by
+# --download-sections + force_keyframes_at_cuts) gets an HTTP 403 fetching
+# them, deterministically, every attempt. Verified 2026-08-27: with android_vr
+# in the list, yt-dlp still preferred its copy of itag 299 over tv_simply's
+# and reproduced the identical 403; dropping it entirely let extraction pick
+# a fetchable source for the same itag.
+CLIENT_RETRY_FALLBACK_CLIENT = "tv_simply,tv,web"
+
+
+def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str,
+                      player_client: str | None = None):
     def _fn(log: LogFn, progress_hook):
         return downloader.download(
             resolved,
@@ -132,6 +199,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
             log=log,
             progress_hook=progress_hook,
             pre_resolved=True,
+            player_client=player_client,
         )
     return _fn
 
@@ -147,7 +215,7 @@ def run_batch(
     log: LogFn = _print_log,
     set_status: Callable[[str], None] = lambda *_: None,
     on_item: Callable[[int, str, str, float | None], None] = lambda *a: None,
-    resolve_fn: Callable = resolve_url,
+    resolve_fn: Callable = resolve_urls,
     browser_factory: Callable = _launch_temp_browser,
     playwright_ok: bool = _PLAYWRIGHT_OK,
 ) -> BatchResult:
@@ -172,23 +240,34 @@ def run_batch(
     )
     work_items: list[tuple[int, str, str, str]] = []
     try:
-        for idx, url in enumerate(urls, 1):
+        idx = 0
+        for url in urls:
             ts = datetime.now().strftime("%H:%M:%S")
             if url in history_set and not policy.force:
+                idx += 1
                 log(f"[{ts}] Skipping (already downloaded): {url[:80]}", "muted")
                 on_item(idx, url, "skipped", None)
                 continue
             if policy.gallery:
-                resolved, tpl = url, ""
+                idx += 1
+                resolved_list = [url]           # gallery-dl ignores the template
             else:
-                log(f"\n[{ts}] Resolving {idx}/{len(urls)}: {url[:80]}", "accent")
-                on_item(idx, url, "resolving", None)
-                resolved = resolve_fn(
+                log(f"\n[{ts}] Resolving {idx + 1}/{len(urls)}: {url[:80]}", "accent")
+                on_item(idx + 1, url, "resolving", None)
+                resolved_list = resolve_fn(
                     url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
                 )
-                tpl = build_output_template(idx, url, resolved, len(urls), pad)
-            on_item(idx, url, "queued", None)
-            work_items.append((idx, url, resolved, tpl))
+                if len(resolved_list) > 1:
+                    log(f"  Page has {len(resolved_list)} videos - queuing all of them", "info")
+            # A page URL that embeds several videos (e.g. an article carrying its
+            # own recap plus an interview) fans out into one work item per video.
+            for resolved in resolved_list:
+                idx += 1
+                tpl = "" if policy.gallery else build_output_template(
+                    idx, url, resolved, len(urls), pad
+                )
+                on_item(idx, url, "queued", None)
+                work_items.append((idx, url, resolved, tpl))
     finally:
         if worker_browser:
             try:
@@ -217,6 +296,16 @@ def run_batch(
                 retry_max=policy.retry_max, retry_delays=policy.retry_delays,
                 url=url, idx=idx, log=log, set_status=set_status,
                 set_item=_item_cb(idx, url),
+                login_wall_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                      player_client=LOGIN_WALL_FALLBACK_CLIENT)
+                ),
+                client_retry_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                      player_client=CLIENT_RETRY_FALLBACK_CLIENT)
+                ),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
         }

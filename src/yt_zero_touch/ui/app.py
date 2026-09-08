@@ -777,10 +777,18 @@ class App(tk.Tk):
             self._queue_rows[idx] = iid
 
     def _on_item(self, idx: int, url: str, status: str, pct: float | None):
+        """orchestrator callback - update one queue row. Runs off-thread.
+
+        idx can exceed the row count _reset_queue pre-populated: a page URL
+        that embeds several videos (see resolver.resolve_urls) fans out into
+        one work item per video, so a row is created here on first sight.
+        """
         def _apply():
             iid = self._queue_rows.get(idx)
             if not iid:
-                return
+                iid = self.queue.insert(
+                    "", "end", values=(str(idx), url, "Queued", "-"), tags=("queued",))
+                self._queue_rows[idx] = iid
             lbl, _ = STATUS_STYLE.get(status, (status.capitalize(), COLORS["text"]))
             pct_str = f"{pct:.1f}%" if pct is not None else "-"
             self.queue.item(iid, values=(str(idx), url, lbl, pct_str), tags=(status,))
