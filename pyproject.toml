@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-zero-touch"
+version = "2.0.0"
+description = "Zero-touch video and image downloader for Windows and Premiere Pro"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "YT Zero Touch" }]
+dependencies = [
+    "yt-dlp",
+    "playwright",
+    "gdown",
+    "gallery-dl",
+    "plyer",
+]
+
+[project.scripts]
+yt-zero-touch = "yt_zero_touch.ui.app:main"
+yt-watcher = "yt_zero_touch.ui.cli.watcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
