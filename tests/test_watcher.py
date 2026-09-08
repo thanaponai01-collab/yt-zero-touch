@@ -3,7 +3,7 @@ Tests for the watcher's completed-download harvest.
 
 These exist for one reason: a directory-scoped `.part` check used to sit here
 and fail finished downloads because *some other* attempt had left debris in the
-output folder (issue #10, ADR-0004). The tests below pin the rule that replaced
+output folder (issue #10, ADR-0005). The tests below pin the rule that replaced
 it — a truthy DownloadOutcome is recorded as done, whatever else is on disk.
 
 Run with:  python -m pytest tests/ -q     (or: python -m unittest -v)

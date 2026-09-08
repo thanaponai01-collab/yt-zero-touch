@@ -354,7 +354,7 @@ class TestH264EncoderSelection(unittest.TestCase):
 
 
 class TestMergeSessionVerify(unittest.TestCase):
-    """_MergeSession.verify() is the safety net ADR-0004 leans on to justify
+    """_MergeSession.verify() is the safety net ADR-0005 leans on to justify
     trusting a truthy DownloadOutcome unconditionally — so a merge that
     reports "finished" for a file that then isn't on disk must fail, not pass
     with a warning nobody in a zero-touch pipeline will read."""

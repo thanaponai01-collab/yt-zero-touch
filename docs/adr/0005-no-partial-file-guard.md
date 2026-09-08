@@ -1,4 +1,4 @@
-# ADR-0004: A leftover `.part` is not evidence — the partial-file guard is gone
+# ADR-0005: A leftover `.part` is not evidence — the partial-file guard is gone
 
 - **Status:** Accepted
 - **Date:** 2026-08-13

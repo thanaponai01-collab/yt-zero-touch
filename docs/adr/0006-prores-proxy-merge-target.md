@@ -1,4 +1,4 @@
-# ADR-0005: ProRes 422 Proxy is an opt-in second merge target, not a replacement
+# ADR-0006: ProRes 422 Proxy is an opt-in second merge target, not a replacement
 
 - **Status:** Accepted
 - **Date:** 2026-09-07

@@ -126,7 +126,7 @@ def _harvest_completed(
     A truthy DownloadOutcome is recorded as done with no second opinion. The
     download call already refuses to report success unless yt-dlp returned 0
     *and* every merged file passed its ffprobe (ADR-0003); re-judging that here
-    from the state of the output directory is what ADR-0004 removed.
+    from the state of the output directory is what ADR-0005 removed.
     """
     for url in [u for u, f in list(in_flight.items()) if f.done()]:
         future = in_flight.pop(url)

@@ -1098,7 +1098,7 @@ def check_disk_space(
 
 # There is deliberately no has_partial_files() here any more. A leftover .part
 # is resume state or debris from an abandoned attempt — never evidence about
-# the download that just succeeded. See docs/adr/0004.
+# the download that just succeeded. See docs/adr/0005.
 
 
 # ---------------------------------------------------------------------------
