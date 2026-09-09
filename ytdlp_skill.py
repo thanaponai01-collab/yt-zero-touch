@@ -23,6 +23,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -99,6 +100,13 @@ def _find_deno() -> str | None:
 
 _DENO_PATH = _find_deno()
 
+# Default install path install.bat's bgutil-ytdlp-pot-provider step writes to
+# (see ADR-0004) — passed explicitly so the plugin's HTTP PO Token provider
+# knows script mode is in use and logs its always-failing localhost:4416
+# ping as expected info rather than a warning.
+_POT_SCRIPT_PATH = str(
+    Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js")
+
 # Quality presets, height-capped only. "format_sort" (ydl_opts) ranks by
 # resolution first and prefers H.264 *within* a resolution — so ≤1080p
 # output is unchanged (Premiere-native H.264) but 1440p/4K now actually
@@ -165,9 +173,97 @@ def is_image_host(url: str) -> bool:
 # silent hang. Bump this constant if that case ever matters.
 _SECTION_DOWNLOAD_TIMEOUT_S = 300
 
+# A section trim always goes through yt-dlp's FFmpegFD external downloader
+# (the seek needs ffmpeg's -ss), which spawns ffmpeg and blocks on plain
+# `proc.wait()` — see yt_dlp/downloader/external.py ExternalFD.real_download /
+# FFmpegFD._call_downloader. It fires progress_hooks exactly once, *after*
+# ffmpeg has already exited, never while the process is running. So a
+# watchdog living in a progress hook (the previous approach here) can never
+# see a stuck download, let alone abort one — it is permanently dead code and
+# the section trim hangs forever despite it. The only place that can actually
+# see and kill the live ffmpeg process is whatever spawns it, so we intercept
+# that: patch the `Popen` yt-dlp's external downloader uses to hand every
+# spawned process to a per-thread watchdog, which kills it if the deadline
+# passes before the download finishes on its own.
+_section_watchdogs: "dict[int, _FFmpegSectionWatchdog]" = {}
+_section_watchdogs_lock = threading.Lock()
+_popen_patch_lock = threading.Lock()
+_popen_patched = False
 
-class _SectionTimeout(Exception):
-    """Raised from the progress hook to abort a stuck section download."""
+
+def _ensure_ffmpeg_popen_patched() -> None:
+    """Patch yt_dlp's external-downloader Popen once so every process it
+    spawns is handed to whichever _FFmpegSectionWatchdog is active on the
+    spawning thread (if any). Idempotent and safe to call unconditionally —
+    downloads with no active watchdog on their thread are a no-op lookup.
+    """
+    global _popen_patched
+    with _popen_patch_lock:
+        if _popen_patched:
+            return
+        import yt_dlp.downloader.external as _ext
+
+        _real_popen = _ext.Popen
+
+        class _DispatchingPopen(_real_popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                with _section_watchdogs_lock:
+                    watchdog = _section_watchdogs.get(threading.get_ident())
+                if watchdog is not None:
+                    watchdog._capture(self)
+
+        _ext.Popen = _DispatchingPopen
+        _popen_patched = True
+
+
+class _FFmpegSectionWatchdog:
+    """Context manager that enforces _SECTION_DOWNLOAD_TIMEOUT_S by killing
+    the actual ffmpeg subprocess a section trim spawns, rather than relying on
+    a progress hook that never fires while ffmpeg is running (see above).
+
+    Scoped to the calling thread via a thread-id-keyed registry, so concurrent
+    section trims on different worker threads each only ever see and kill
+    their own ffmpeg process.
+    """
+
+    def __init__(self, timeout_s: float):
+        self._timeout_s = timeout_s
+        self._done = threading.Event()
+        self._procs: "list" = []
+        self._procs_lock = threading.Lock()
+        self._thread: "threading.Thread | None" = None
+        self.timed_out = False
+
+    def _capture(self, proc) -> None:
+        with self._procs_lock:
+            self._procs.append(proc)
+
+    def _watch(self) -> None:
+        if self._done.wait(self._timeout_s):
+            return
+        self.timed_out = True
+        with self._procs_lock:
+            procs = list(self._procs)
+        for proc in procs:
+            try:
+                if proc.poll() is None:
+                    proc.kill(timeout=None)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "_FFmpegSectionWatchdog":
+        _ensure_ffmpeg_popen_patched()
+        with _section_watchdogs_lock:
+            _section_watchdogs[threading.get_ident()] = self
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._done.set()
+        with _section_watchdogs_lock:
+            _section_watchdogs.pop(threading.get_ident(), None)
 
 
 def _log_section_timeout(sections, log: Callable) -> None:
@@ -491,6 +587,7 @@ def download(
     log: LogFn = _print_log,
     progress_hook: "Callable[[dict], None] | None" = None,
     pre_resolved: bool = False,
+    player_client: "str | None" = None,
     _browser=None,
 ) -> bool:
     """Download a single URL (or full playlist).
@@ -519,6 +616,9 @@ def download(
         progress_hook:  Optional yt-dlp progress_hook (called with dict containing
                         status/_percent_str/_speed_str/_eta_str/filename).
         pre_resolved:   If True, skip resolve_url() — caller already resolved.
+        player_client:  Override yt-dlp's youtube:player_client extractor arg,
+                         e.g. "tv_simply,android_vr,tv,web" — used to retry
+                         past a bot-check the default client just failed.
         _browser:       Pass an open Playwright browser to reuse (advanced).
 
     Returns:
@@ -577,7 +677,7 @@ def download(
     ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, cookie_file, browser_cookie, force, log, progress_hook,
-        sections=parsed_sections, target_codec=target_codec,
+        sections=parsed_sections, target_codec=target_codec, player_client=player_client,
     )
     # Auto-fallback: an Instagram/Twitter/… link that yt-dlp can't handle is
     # usually a photo or carousel — let gallery-dl take a turn before giving up.
@@ -602,6 +702,7 @@ def _download_api(
     extra_progress_hook: "Callable[[dict], None] | None" = None,
     sections: "list[tuple[float, float]] | None" = None,
     target_codec: str = "h264",
+    player_client: "str | None" = None,
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -615,20 +716,8 @@ def _download_api(
             log(f"  {msg}", "error")
 
     last_milestone = [-1]
-    section_deadline = [None]   # wall-clock cutoff, armed on first section byte
-    section_timed_out = [False]  # set by the watchdog so we can report it even
-                                 # if ignoreerrors swallows the raised exception
 
     def _progress(d: dict):
-        # Watchdog for section trims: ffmpeg seeks by reading from the start, so
-        # a clip deep in a long video can read forever. Abort past the deadline
-        # (raising here stops the download) rather than hang with no feedback.
-        if sections and d["status"] == "downloading":
-            if section_deadline[0] is None:
-                section_deadline[0] = time.monotonic() + _SECTION_DOWNLOAD_TIMEOUT_S
-            elif time.monotonic() > section_deadline[0]:
-                section_timed_out[0] = True
-                raise _SectionTimeout()
         if d["status"] == "downloading":
             pct_str = d.get("_percent_str", "").strip().rstrip("%")
             speed   = d.get("_speed_str", "?").strip()
@@ -758,14 +847,25 @@ def _download_api(
         # Unrelated to the above: fragmented (DASH/HLS) downloads retry
         # per-fragment, so this budget really is per-fragment and 10 is fine.
         "fragment_retries":              10,
-        # ponytail: no player_client override — yt-dlp's built-in default
-        # (tv_simply/android_vr became erratic and now often serve only
-        # format 18/360p, see yt-dlp#16150) is actively retuned upstream as
-        # YouTube's PO-token requirements shift; pin a client list again only
-        # if a specific format (e.g. Shorts) breaks with the new default.
+        # ponytail: no player_client override by default — yt-dlp's built-in
+        # default (tv_simply/android_vr became erratic and now often serve
+        # only format 18/360p, see yt-dlp#16150) is actively retuned upstream
+        # as YouTube's PO-token requirements shift, so pinning one here would
+        # itself go stale. player_client is instead an explicit override
+        # (see download_with_retry's login-wall fallback in orchestrator.py),
+        # used only after the default has already failed a bot-check on this
+        # URL — the one case where a specific known-good client list
+        # (tv_simply,android_vr,tv,web — no PO token needed) is worth a shot.
         # generic:impersonate retries with browser impersonation on Cloudflare 403s.
         "extractor_args":                {
             "generic": {"impersonate": [""]},
+            **({"youtube": {"player_client": player_client.split(",")}}
+               if player_client else {}),
+            # Tells the bgutil PO Token HTTP provider that script mode
+            # (ADR-0004) is in use, so its always-failing ping to the
+            # unused localhost:4416 server logs as an expected info line
+            # instead of a warning that looks like a real failure.
+            "youtubepot-bgutilscript": {"script_path": [_POT_SCRIPT_PATH]},
         },
         # Top-level option, not under extractor_args — lets yt-dlp fetch its
         # JS challenge-solver script from GitHub instead of npm.
@@ -799,32 +899,53 @@ def _download_api(
             # aborts (30s of zero bytes) instead of blocking forever. The
             # wall-clock watchdog in _progress covers the slow-but-progressing
             # deep-seek case that -rw_timeout can't see.
-            ydl_opts["external_downloader_args"] = {"ffmpeg_i": ["-rw_timeout", "30000000"]}
+            #
+            # "ffmpeg" (not "ffmpeg_i"/"ffmpeg_o") lands in FFmpegFD's general
+            # arg list, appended after its own "-loglevel quiet" (added because
+            # our top-level ydl_opts["quiet"]=True) — the later flag wins, so
+            # this un-silences ffmpeg's stderr. Without it, a CDN rejection
+            # (e.g. HTTP 403 on a stale/erratic-client URL, see the
+            # player_client comment above) is invisible: ffmpeg reports only a
+            # meaningless raw exit code ("ffmpeg exited with code 3436169992"),
+            # captured_errors never contains "403", and orchestrator.py's
+            # classify_failure/login-wall-fallback — built to catch exactly
+            # this — never fires, so download_with_retry blindly repeats the
+            # same doomed request instead of retrying with a different client.
+            ydl_opts["external_downloader_args"] = {
+                "ffmpeg_i": ["-rw_timeout", "30000000"],
+                "ffmpeg": ["-loglevel", "warning"],
+            }
         except Exception as exc:
             log(f"  Section trim unavailable ({exc}) — downloading full video.", "warn")
 
+    # Real enforced timeout for section trims: kills the actual ffmpeg
+    # subprocess if it's still running past _SECTION_DOWNLOAD_TIMEOUT_S. See
+    # the comment above _ensure_ffmpeg_popen_patched for why a progress-hook
+    # watchdog can't do this. Non-section downloads skip it entirely.
+    watchdog_cm = _FFmpegSectionWatchdog(_SECTION_DOWNLOAD_TIMEOUT_S) if sections \
+        else contextlib.nullcontext()
+    watchdog: "_FFmpegSectionWatchdog | None" = None
+
     try:
-        # Second of the session's two release paths: whatever the download
-        # does — return, raise, or abort — leaving this scope frees the gate.
-        # The first path is inside merge_started, and it is the one that
-        # covers a playlist, where this scope isn't left until every entry is
-        # done.
-        with merge:
-            with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ret = ydl.download([resolved])
-        if section_timed_out[0]:
-            _log_section_timeout(sections, log)
-            return False
+        with watchdog_cm as watchdog:
+            # Second of the session's two release paths: whatever the download
+            # does — return, raise, or abort — leaving this scope frees the
+            # gate. The first path is inside merge_started, and it is the one
+            # that covers a playlist, where this scope isn't left until every
+            # entry is done.
+            with merge:
+                with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ret = ydl.download([resolved])
+            if watchdog is not None and watchdog.timed_out:
+                _log_section_timeout(sections, log)
+                return False
         if ret != 0:
             return False
         # Collect on the container commitment: every file that merged is
         # ffprobed before this reports success. See _MergeSession.verify.
         return merge.verify()
-    except _SectionTimeout:
-        _log_section_timeout(sections, log)
-        return False
     except Exception as exc:
-        if section_timed_out[0]:
+        if watchdog is not None and watchdog.timed_out:
             _log_section_timeout(sections, log)
             return False
         log(f"  yt-dlp API error: {exc}", "error")
@@ -899,6 +1020,7 @@ class Downloader:
         log: "LogFn | None" = None,
         progress_hook: "Callable[[dict], None] | None" = None,
         pre_resolved: bool = False,
+        player_client: "str | None" = None,
     ) -> bool:
         """Same as module-level download(), but reuses the shared browser."""
         ck = cookie_file or self.cookie_file
@@ -922,6 +1044,7 @@ class Downloader:
             log=log or self.log,
             progress_hook=progress_hook,
             pre_resolved=pre_resolved,
+            player_client=player_client,
             _browser=browser,
         )
 

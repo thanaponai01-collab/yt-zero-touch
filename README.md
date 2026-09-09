@@ -43,6 +43,7 @@ no terminal needed.
 |---|---|
 | **Python 3.10+** | [python.org/downloads](https://www.python.org/downloads/) — check "Add to PATH" |
 | **FFmpeg** | Required for merging video + audio |
+| **Git + Node.js** | Optional — lets `install.bat` set up a local YouTube PO Token generator, so downloads don't keep hitting a login wall that forces a fresh `cookies.txt` export. Skipped with a warning if either is missing. |
 | Internet connection | For package install |
 
 ---
@@ -157,3 +158,4 @@ yt-zero-touch/
 | `WinError 32` on update | Close the app, run `pip install -U yt-dlp gallery-dl` in a terminal, reopen |
 | Login-required video/photo | Supply a `cookies.txt` or pick your browser in the cookie dropdown |
 | Photos mode does nothing | Install gallery-dl: `pip install gallery-dl` (or **Update tools**) |
+| YouTube keeps hitting a login wall, forcing a fresh `cookies.txt` every time | Install Git + Node.js, then re-run `install.bat` — it builds a local PO Token generator (`%USERPROFILE%\bgutil-ytdlp-pot-provider`) that clears YouTube's anti-bot check without cookies. See ADR-0004. |

@@ -85,6 +85,18 @@ class TestClassifyFailure(unittest.TestCase):
         fc = classify_failure(["This video is not available in your country"])
         self.assertEqual(fc.reason, "geo_blocked")
 
+    def test_ffmpeg_cdn_rejection_maps_to_client_retry_not_cookies(self):
+        # Regression: ffmpeg's own error text for a CDN-rejected section-trim
+        # URL contains a bare 403, but the generic phrase rule above used to
+        # win first and misclassify it as a login wall — a permanent failure
+        # that silently killed the d398925 alternate-client retry.
+        fc = classify_failure([
+            "[https @ 0x1eeb85789c0] HTTP error 403 Forbidden",
+            "Error opening input: Server returned 403 Forbidden (access denied)",
+        ])
+        self.assertEqual(fc.reason, "client_served_bad_url")
+        self.assertFalse(fc.permanent)
+
     def test_no_formats_suggests_update(self):
         fc = classify_failure(["ERROR: No video formats found"])
         self.assertEqual(fc.reason, "needs_update")
@@ -146,6 +158,37 @@ class TestDownloadWithRetry(unittest.TestCase):
         self.assertEqual(len(calls), 3)   # initial + 2 retries
         self.assertIsNone(outcome.failure)
 
+    def test_client_retry_keeps_using_fallback_client_on_later_attempts(self):
+        # Regression: once the default client is confirmed broken (403), the
+        # one-shot fallback used to be spent on a single attempt and every
+        # later retry in the same loop reverted to the still-broken default
+        # client, burning the rest of the retry budget on a guaranteed 403.
+        default_calls = []
+        fallback_calls = []
+
+        def default_dl(log, hook):
+            default_calls.append(1)
+            log("Error opening input: Server returned 403 Forbidden", "error")
+            return False
+
+        def fallback_dl(log, hook):
+            fallback_calls.append(1)
+            # Fails for an unrelated, transient reason on its first use too —
+            # the loop should still keep using this client on later attempts
+            # rather than falling back to the confirmed-broken default.
+            if len(fallback_calls) == 1:
+                log("ERROR: connection reset by peer", "error")
+                return False
+            return True
+
+        outcome = download_with_retry(
+            default_dl, retry_max=3, retry_delays=(0, 0, 0), url="x",
+            sleep=lambda *_: None, client_retry_fallback_fn=fallback_dl,
+        )
+        self.assertTrue(outcome.ok)
+        self.assertEqual(len(default_calls), 1)   # default client tried exactly once
+        self.assertEqual(len(fallback_calls), 2)  # fallback used for every attempt after
+
 
 class TestBuildOutputTemplate(unittest.TestCase):
     def test_single_known_url_uses_title_id(self):
@@ -196,7 +239,7 @@ class TestRunBatch(unittest.TestCase):
             history_lock=threading.Lock(),
             history_path=self.history_path,
             log=lambda *a, **k: None,
-            resolve_fn=lambda url, **kw: url,   # identity resolver
+            resolve_fn=lambda url, **kw: [url],   # identity resolver
             playwright_ok=False,                # no browser in tests
         )
 
@@ -234,7 +277,7 @@ class TestRunBatch(unittest.TestCase):
 
             def download(self, resolved, **kwargs):
                 self.calls += 1
-                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                kwargs["log"]("ERROR: Video unavailable", "error")
                 return False
 
         history = set()
@@ -247,7 +290,48 @@ class TestRunBatch(unittest.TestCase):
         self.assertNotIn("http://a/1", history)      # failures never recorded
         self.assertEqual(len(result.failures), 1)
         _idx, _url, failure = result.failures[0]
+        self.assertEqual(failure.reason, "removed")
+
+    def test_login_wall_gets_one_fallback_client_attempt_before_permanent(self):
+        # needs_cookies is special-cased in run_batch: the default client may
+        # have simply failed a bot-check, so it earns exactly one extra
+        # attempt with an alternate player_client before being declared
+        # permanent — unlike other permanent causes (see test above).
+        class _LoginWalledDownloader:
+            def __init__(self):
+                self.calls = 0
+                self.player_clients = []
+
+            def download(self, resolved, **kwargs):
+                self.calls += 1
+                self.player_clients.append(kwargs.get("player_client"))
+                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                return False
+
+        history = set()
+        dl = _LoginWalledDownloader()
+        result = self._run(["http://a/1"], history, dl)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(dl.calls, 2)                 # original + one fallback
+        self.assertIsNone(dl.player_clients[0])       # default client first
+        self.assertIsNotNone(dl.player_clients[1])    # fallback client second
+        _idx, _url, failure = result.failures[0]
         self.assertEqual(failure.reason, "needs_cookies")
+
+    def test_login_wall_fallback_success_counts_as_success(self):
+        class _RecoversOnFallback:
+            def download(self, resolved, **kwargs):
+                if kwargs.get("player_client"):
+                    kwargs["log"]("downloading…", "info")
+                    return True
+                kwargs["log"]("ERROR: Private video. Sign in to confirm", "error")
+                return False
+
+        history = set()
+        result = self._run(["http://a/1"], history, _RecoversOnFallback())
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertIn("http://a/1", history)
 
     def test_on_item_reports_terminal_states(self):
         # The queue-table callback must see a terminal "done" for a success and
@@ -270,7 +354,7 @@ class TestRunBatch(unittest.TestCase):
             history=set(), history_lock=threading.Lock(),
             history_path=self.history_path, log=lambda *a, **k: None,
             on_item=on_item,
-            resolve_fn=lambda url, **kw: url, playwright_ok=False,
+            resolve_fn=lambda url, **kw: [url], playwright_ok=False,
         )
         terminal = {(idx, st) for idx, st in events if st in ("done", "failed")}
         self.assertIn((1, "done"), terminal)

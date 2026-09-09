@@ -13,7 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from yt_zero_touch.core.failures import FailureClass, classify_failure, is_permanent_error
+from yt_zero_touch.core.failures import (
+    _CLIENT_RETRY,
+    _LOGIN,
+    FailureClass,
+    classify_failure,
+    is_permanent_error,
+)
 from yt_zero_touch.core.history import HistoryStore, save_history
 from yt_zero_touch.core.models import (
     BatchPolicy,
@@ -44,8 +50,26 @@ def download_with_retry(
     set_status: Callable[[str], None] = lambda *_: None,
     set_item: Callable[[str, float | None], None] = lambda *a: None,
     sleep: Callable[[float], None] = time.sleep,
+    login_wall_fallback_fn: Callable[[LogFn, Callable[[dict], None]], bool] | None = None,
+    client_retry_fallback_fn: Callable[[LogFn, Callable[[dict], None]], bool] | None = None,
 ) -> DownloadOutcome:
-    """Run download_fn, retrying transient failures with backoff."""
+    """Run download_fn, retrying transient failures with backoff.
+
+    login_wall_fallback_fn, if given, is tried exactly once — outside the
+    retry_max budget — the first time classify_failure calls "needs_cookies":
+    that message also fires when a valid session's default player client just
+    fails YouTube's bot-check, which a different client can clear without any
+    new cookies. Only if the fallback also comes back login-walled is the
+    failure reported as permanent.
+
+    client_retry_fallback_fn is the analogous one-shot fallback for
+    _CLIENT_RETRY (a client served a format URL ffmpeg can't fetch). Kept
+    separate from login_wall_fallback_fn because the two need different
+    client lists: the login-wall fallback leans on android_vr specifically
+    for its no-PO-token property, but android_vr is also the documented
+    source of the _CLIENT_RETRY failure itself, so reusing it here would
+    just fail the same way again.
+    """
     prefix = f"[#{idx}] " if idx is not None else ""
 
     def base_log(msg: str, tag: str = "info"):
@@ -93,6 +117,27 @@ def download_with_retry(
 
         last_errors = captured_errors
         failure = classify_failure(captured_errors)
+
+        if failure is _LOGIN and login_wall_fallback_fn is not None:
+            login_wall_fallback_fn, fallback_fn = None, login_wall_fallback_fn
+            base_log(f"  {failure.label} with the default client — trying an "
+                      "alternate player client before giving up…", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            failure = classify_failure(captured_errors)
+        elif failure is _CLIENT_RETRY and client_retry_fallback_fn is not None:
+            client_retry_fallback_fn, fallback_fn = None, client_retry_fallback_fn
+            base_log(f"  {failure.label} with the default client — trying an "
+                      "alternate player client before giving up…", "warn")
+            if fallback_fn(log_capture, progress_hook):
+                return DownloadOutcome(ok=True)
+            # The default client is confirmed broken (that's what _CLIENT_RETRY
+            # means) — keep using the alternate client for any remaining
+            # retries in this loop instead of reverting to a client that will
+            # 403 again every time.
+            download_fn = fallback_fn
+            failure = classify_failure(captured_errors)
+
         if failure and failure.permanent:
             base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
             set_item("failed", None)
@@ -112,7 +157,22 @@ def download_with_retry(
     return DownloadOutcome(ok=False, failure=classify_failure(last_errors))
 
 
-def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
+# yt-dlp's built-in default player client is retuned upstream as YouTube's
+# PO-token requirements shift, so pinning one by default would itself go
+# stale. This is instead an explicit override used only after the default
+# has already failed a bot-check on this URL (login wall) — a known-good
+# client list that needs no PO token.
+LOGIN_WALL_FALLBACK_CLIENT = "tv_simply,android_vr,tv,web"
+
+# _CLIENT_RETRY fallback: same idea, but android_vr deliberately dropped.
+# android_vr's format URLs are the confirmed source of that failure — ffmpeg
+# (forced as external downloader by --download-sections) gets an HTTP 403
+# fetching them, deterministically, every attempt.
+CLIENT_RETRY_FALLBACK_CLIENT = "tv_simply,tv,web"
+
+
+def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str,
+                       player_client: str | None = None):
     def _fn(log: LogFn, progress_hook):
         return downloader.download(
             resolved,
@@ -132,6 +192,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str):
             log=log,
             progress_hook=progress_hook,
             pre_resolved=True,
+            player_client=player_client,
         )
     return _fn
 
@@ -217,6 +278,16 @@ def run_batch(
                 retry_max=policy.retry_max, retry_delays=policy.retry_delays,
                 url=url, idx=idx, log=log, set_status=set_status,
                 set_item=_item_cb(idx, url),
+                login_wall_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                       player_client=LOGIN_WALL_FALLBACK_CLIENT)
+                ),
+                client_retry_fallback_fn=(
+                    None if policy.gallery else
+                    _make_download_fn(downloader, policy, resolved, tpl,
+                                       player_client=CLIENT_RETRY_FALLBACK_CLIENT)
+                ),
             ): (idx, url)
             for idx, url, resolved, tpl in work_items
         }

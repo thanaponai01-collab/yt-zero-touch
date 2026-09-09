@@ -58,7 +58,11 @@ _BROWSER_ARGS = [
 
 _F1_RE      = re.compile(r"formula1\.com/en/video/.*?\.(\d{10,})")
 _BC_ACCT_RE = re.compile(r"BRIGHTCOVE[_\s]*ACCOUNTID[\"\\s:]+(\d+)", re.IGNORECASE)
-_BC_VID_RE  = re.compile(r'videoId["\s:=]+["\']?(\d{10,})')
+# The id shows up in two shapes on the same page, and both must match:
+#   <div ... data-videoid="1709982240646065581">   (lowercase HTML attribute)
+#   \"videoId\":\"1709982240646065581\"            (backslash-escaped JSON payload)
+# Hence IGNORECASE and a separator class that tolerates the escaping backslashes.
+_BC_VID_RE  = re.compile(r'videoid[\\"\'\s:=]+(\d{10,})', re.IGNORECASE)
 _STREAM_RE  = re.compile(
     r'https?://[^\s"\'<>]+(?:\.m3u8|\.mp4|\.mpd)[^\s"\'<>]*', re.IGNORECASE
 )
@@ -106,11 +110,29 @@ def resolve_url(
 ) -> str:
     """Convert any page URL to a direct downloadable URL.
 
+    Returns the first stream found — see resolve_urls() for pages that embed
+    more than one video (e.g. an article with its own video plus an interview).
+    """
+    return resolve_urls(url, cookie_file=cookie_file, log=log, _browser=_browser)[0]
+
+
+def resolve_urls(
+    url: str,
+    cookie_file: "Path | str | None" = None,
+    log: LogFn = _print_log,
+    _browser=None,          # pass an open Playwright browser to reuse it
+) -> list[str]:
+    """Convert a page URL to every direct downloadable URL it embeds.
+
     Handles:
     - Formula1.com → Brightcove player URL
-    - Generic pages with Brightcove embed (static HTML scrape)
+    - Generic pages with Brightcove embed (static HTML scrape) — every distinct
+      video id on the page, not just the first (an article page may carry more
+      than one of its own videos, e.g. a session recap plus a driver interview)
     - Unknown sites → headless browser stream interception (requires playwright)
     - Known yt-dlp sites → pass through unchanged
+
+    Always returns at least one URL (falls back to the input URL unchanged).
     """
     cookie_file = Path(cookie_file) if cookie_file else None
 
@@ -120,18 +142,21 @@ def resolve_url(
         bc = (f"https://players.brightcove.net/6057949432001"
               f"/default_default/index.html?videoId={m.group(1)}")
         log("Resolved F1 → Brightcove player", "info")
-        return bc
+        return [bc]
 
     # 2. Known yt-dlp site — pass through
     if any(d in url for d in _KNOWN_DOMAINS):
-        return url
+        return [url]
 
     # 3. Static HTML Brightcove scrape (fast, no browser)
     try:
-        bc = _brightcove_from_page(url, cookie_file)
-        if bc:
-            log("Found Brightcove embed in page HTML", "info")
-            return bc
+        bcs = _brightcove_all_from_page(url, cookie_file)
+        if bcs:
+            if len(bcs) > 1:
+                log(f"Found {len(bcs)} Brightcove embeds in page HTML", "info")
+            else:
+                log("Found Brightcove embed in page HTML", "info")
+            return bcs
     except Exception:
         pass
 
@@ -142,7 +167,7 @@ def resolve_url(
         try:
             stream = _intercept(browser, url, cookie_file, log)
             if stream:
-                return stream
+                return [stream]
         finally:
             if owned:
                 try:
@@ -152,10 +177,10 @@ def resolve_url(
     else:
         log("playwright not installed — trying URL directly", "warn")
 
-    return url
+    return [url]
 
 
-def _brightcove_from_page(url: str, cookie_file: "Path | None") -> "str | None":
+def _fetch_page_html(url: str, cookie_file: "Path | None") -> str:
     opener = urllib.request.build_opener()
     if cookie_file and cookie_file.exists():
         cj = http.cookiejar.MozillaCookieJar(str(cookie_file))
@@ -163,13 +188,50 @@ def _brightcove_from_page(url: str, cookie_file: "Path | None") -> "str | None":
         opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
     opener.addheaders = [("User-Agent", _USER_AGENT)]
     resp = opener.open(url, timeout=10)
-    html = resp.read().decode("utf-8", errors="replace")
+    return resp.read().decode("utf-8", errors="replace")
+
+
+def _brightcove_from_page(url: str, cookie_file: "Path | None") -> "str | None":
+    return _brightcove_from_html(_fetch_page_html(url, cookie_file))
+
+
+def _brightcove_all_from_page(url: str, cookie_file: "Path | None") -> list[str]:
+    return _brightcove_all_from_html(_fetch_page_html(url, cookie_file))
+
+
+def _brightcove_ids_from_html(html: str) -> list[str]:
+    """Every distinct Brightcove video id on the page, in first-seen order."""
+    seen: dict[str, None] = {}
+    for vid in _BC_VID_RE.findall(html):
+        seen.setdefault(vid, None)
+    return list(seen)
+
+
+def _brightcove_from_html(html: str) -> "str | None":
+    """Build a Brightcove player URL from a page's Brightcove account + video id.
+
+    The first video id on the page is the one used: on an article page the
+    body's own video precedes any 'related videos' rail.
+    """
+    urls = _brightcove_all_from_html(html)
+    return urls[0] if urls else None
+
+
+def _brightcove_all_from_html(html: str) -> list[str]:
+    """A player URL for every distinct video id on the page.
+
+    An article page usually carries its own video(s) first, then a 'related
+    videos' rail — this can't tell the two apart, so a page with a rail will
+    over-collect. Callers that want just the article's own video should use
+    _brightcove_from_html() instead.
+    """
     acct = _BC_ACCT_RE.search(html)
-    vid  = _BC_VID_RE.search(html)
-    if acct and vid:
-        return (f"https://players.brightcove.net/{acct.group(1)}"
-                f"/default_default/index.html?videoId={vid.group(1)}")
-    return None
+    if not acct:
+        return []
+    return [
+        f"https://players.brightcove.net/{acct.group(1)}/default_default/index.html?videoId={vid}"
+        for vid in _brightcove_ids_from_html(html)
+    ]
 
 
 class _TempBrowser:

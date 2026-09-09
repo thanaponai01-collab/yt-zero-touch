@@ -47,6 +47,20 @@ _UNVERIFIED = FailureClass(
     "works, then retry this URL on its own.",
     permanent=True)
 
+# ffmpeg (used as external downloader for --download-sections cuts) reports a
+# CDN rejection (e.g. HTTP 403 on a stale/erratic-client URL) only as a raw
+# process exit code; its own stderr with the real reason inherits the console
+# directly and never reaches this app's logger. A normal ffmpeg failure exits
+# 0-255; anything larger is Windows reporting an abnormal termination, which
+# in practice here means "the URL this client picked didn't work" — the same
+# shape as _LOGIN's bot-check case, so it gets the same one-shot
+# alternate-client retry. Not permanent (unlike _LOGIN): a fresh extraction,
+# even on the same client, often lands a working edge/URL next attempt.
+_CLIENT_RETRY = FailureClass(
+    "client_served_bad_url", "Player client served an unreachable URL",
+    "Retrying with an alternate player client…",
+    permanent=False)
+
 
 _FAILURE_RULES: list[tuple[FailureClass, list[str]]] = [
     (_UNVERIFIED,
@@ -72,6 +86,18 @@ _FAILURE_RULES: list[tuple[FailureClass, list[str]]] = [
 _HTTP_CODE_CAUSE = {"401": _LOGIN, "403": _LOGIN, "404": _REMOVED}
 _HTTP_CODE_RE = re.compile(r"\b(401|403|404)\b")
 
+# See _CLIENT_RETRY above: a normal ffmpeg exit is 0-255, so a larger reported
+# code is Windows' abnormal-termination value, not a real ffmpeg status.
+_FFMPEG_EXIT_RE = re.compile(r"ffmpeg exited with code (\d+)")
+
+# ffmpeg's own CDN-rejection text for a section-trim's external downloader
+# ("Error opening input: Server returned 403 Forbidden") contains a bare 403,
+# which the generic phrase rule below reads as a login wall — a permanent
+# failure that stops retries dead. It isn't one: the player client's URL was
+# rejected by the CDN, not the account. Must be checked before _FAILURE_RULES
+# so the generic "http error 403" phrase can't win first.
+_FFMPEG_INPUT_ERROR_RE = re.compile(r"error opening input")
+
 
 def classify_failure(messages: list[str]) -> FailureClass | None:
     """Classify captured error messages into a typed cause.
@@ -80,12 +106,17 @@ def classify_failure(messages: list[str]) -> FailureClass | None:
     unclassified failure is treated as transient (retryable).
     """
     combined = " ".join(messages).lower()
+    if _FFMPEG_INPUT_ERROR_RE.search(combined) and _HTTP_CODE_RE.search(combined):
+        return _CLIENT_RETRY
     for failure, keywords in _FAILURE_RULES:
         if any(kw in combined for kw in keywords):
             return failure
     m = _HTTP_CODE_RE.search(combined)
     if m:
         return _HTTP_CODE_CAUSE[m.group(1)]
+    m = _FFMPEG_EXIT_RE.search(combined)
+    if m and int(m.group(1)) > 255:
+        return _CLIENT_RETRY
     return None
 
 
