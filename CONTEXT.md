@@ -29,8 +29,15 @@ download call can serve many merges. See ADR-0001.
 **Container commitment** — the choice of output container, forced before any
 codec is known because `YoutubeDL()` reads `merge_output_format` at
 construction. When `TRANSCODE_TO_H264` is on this commits to mp4 on the
-*promise* that a transcode will make it legal. The merge session collects on
-that promise. See ADR-0003.
+*promise* that a transcode will make it legal; a ProRes merge target commits
+to mov the same way. The merge session collects on that promise. See
+ADR-0003, ADR-0005.
+
+**Merge target** (`transcode_plan.TargetCodec`) — which codec a download's
+merge step re-encodes into: `"h264"` (default — small, Premiere-native,
+stream-copies when the source already is H.264) or `"prores"` (ProRes 422
+Proxy — intra-only, edit-friendly, always re-encodes, much larger). Chosen
+per download, not per machine — see ADR-0005.
 
 **Transcode gate** — a process-wide, non-reentrant lock permitting one heavy
 software encode at a time. Concurrent 4K libx264 encodes stack multi-GB

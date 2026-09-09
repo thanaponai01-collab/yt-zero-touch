@@ -214,6 +214,7 @@ class BatchPolicy:
     write_metadata: bool = False
     playlist: bool = False
     sections: "str | None" = None    # e.g. "10:00-20:00" — trim to a clip
+    target_codec: str = "h264"       # merge target — see transcode_plan.TargetCodec
     max_workers: int = 3
     retry_max: int = _DEFAULT_RETRY_MAX
     retry_delays: tuple = _DEFAULT_RETRY_DELAYS
@@ -415,6 +416,7 @@ def _make_download_fn(downloader, policy: BatchPolicy, resolved: str, tpl: str,
             force=policy.force,
             out_template=tpl,
             sections=policy.sections,
+            target_codec=policy.target_codec,
             log=log,
             progress_hook=progress_hook,
             pre_resolved=True,

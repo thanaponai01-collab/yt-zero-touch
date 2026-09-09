@@ -77,6 +77,22 @@ _H264_NVENC_ARGS = [
     "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
 ]
 
+# ProRes 422 Proxy — the opt-in alternative merge target (see TargetCodec
+# below). Every ProRes profile is intra-only (no long-GOP), which is what
+# makes it edit-friendly: scrubbing/multicam don't hunt through a GOP the way
+# they do on H.264. "Proxy" (-profile:v 0) is the lowest-bitrate tier of the
+# family — plenty for footage that started as a YouTube download (already
+# lossy, already 8-bit 4:2:0) rather than a camera-original grade.
+# -vendor apl0 tags the stream the way Apple's own encoders do, which is what
+# lets QuickTime/Premiere recognise it as genuine ProRes rather than a
+# same-fourcc lookalike. -pix_fmt yuv422p10le is what every ProRes profile
+# (proxy included) actually stores internally, even though the *source* is
+# 8-bit — encoding to it does not add quality, only header-level compatibility.
+_PRORES_PROXY_ARGS = [
+    "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
+    "-pix_fmt", "yuv422p10le",
+]
+
 
 @dataclass(frozen=True)
 class Encoder:
@@ -92,8 +108,9 @@ class Encoder:
     # The ffmpeg args that run this encoder, "-c:v <name>" first.
     args: "list[str]"
     # Which encoder this is, for *branching*: the transcode gate serializes
-    # libx264 and lets NVENC run concurrently. Not for display — see name.
-    kind: Literal["nvenc", "libx264"]
+    # every software encoder (libx264, prores_ks) and lets NVENC run
+    # concurrently. Not for display — see name.
+    kind: Literal["nvenc", "libx264", "prores"]
 
     @property
     def name(self) -> str:
@@ -138,6 +155,12 @@ def _h264_encoder() -> Encoder:
         return _h264_encoder_cache
 
 
+# No detection needed here the way _h264_encoder needs one: there is no
+# hardware ProRes path wired up (this is a single Windows editing machine,
+# not one with Apple's VideoToolbox), so this is always the software encoder.
+_PRORES_ENCODER = Encoder(_PRORES_PROXY_ARGS, "prores")
+
+
 # Audio codec prefixes yt-dlp reports that are already AAC — safe to copy
 # straight through instead of re-encoding AAC → AAC (generation loss for
 # nothing, since Premiere accepts AAC natively either way).
@@ -169,7 +192,17 @@ PRE_MERGE_DEFAULT_ARGS = [
 ]
 
 
-def container_for(audio_only: bool) -> str:
+# Which encoder a merge targets. "h264" is the shipped default (Premiere-
+# native, small files, stream-copies when the source already is H.264).
+# "prores" is the opt-in per-download toggle (app.py's "ProRes 422 Proxy"
+# checkbox) for footage that's about to be edited hard — every frame is a
+# full image, so scrubbing/multicam don't hunt through a GOP, at the cost of
+# always re-encoding (ProRes can never be stream-copied from a lossy source)
+# and a much bigger file.
+TargetCodec = Literal["h264", "prores"]
+
+
+def container_for(audio_only: bool, target_codec: TargetCodec = "h264") -> str:
     """yt-dlp's merge_output_format, decided at ydl_opts build time —
     before any codec is known, since YoutubeDL() reads this at construction.
 
@@ -182,9 +215,18 @@ def container_for(audio_only: bool) -> str:
     container from the *source* codec before the transcode decision runs,
     and a VP9 source still lands in mkv even after its video stream gets
     re-encoded to H.264.
+
+    target_codec="prores" always forces "mov" — ProRes always re-encodes
+    (see TargetCodec), so there is no source-codec prediction to get wrong
+    the way there is for mp4/H.264, and mov is the container every NLE
+    expects ProRes in (see also _MergeSession, which reads "mov" the same
+    way it reads "mp4": a container commitment to collect on after the
+    download).
     """
     if audio_only:
         return "opus"
+    if target_codec == "prores":
+        return "mov"
     return "mp4" if TRANSCODE_TO_H264 else "mp4/mkv"
 
 # ---------------------------------------------------------------------------
@@ -216,11 +258,25 @@ def _codec_case(vcodec: str) -> CodecCase:
     return "h264" if vcodec.startswith(_H264_VCODEC_PREFIXES) else "non_h264"
 
 
-def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
-    """Pick ffmpeg merge args based on the codecs yt-dlp actually selected.
+def _audio_merge_args(acodec: str) -> "list[str]":
+    """Shared by both merge targets: re-encode to AAC unless the source
+    already is AAC, in which case saying nothing lets the merger's "-c copy"
+    default carry it through untouched (skips a pointless AAC→AAC re-encode).
+    """
+    return (
+        [] if acodec.startswith(_AAC_ACODEC_PREFIXES)
+        else ["-c:a", "aac", "-b:a", "192k"]
+    )
 
-    Video and audio are decided independently, so a merge can land on any of
-    four combinations:
+
+def plan_transcode(
+    vcodec: str, acodec: str, target_codec: TargetCodec = "h264",
+) -> TranscodePlan:
+    """Pick ffmpeg merge args based on the codecs yt-dlp actually selected
+    and which merge target this download asked for (see TargetCodec).
+
+    For target_codec="h264" (the default), video and audio are decided
+    independently, so a merge can land on any of four combinations:
 
         -c:v copy             source is already H.264 — no re-encode
         -c:v h264_nvenc       source is VP9/AV1, or unreadable — re-encoded so
@@ -233,70 +289,100 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
                               args start with "-c copy", so saying nothing
                               copies it and skips a pointless AAC→AAC re-encode
 
-    Every combination gets -movflags +faststart, which moves the mp4 index to
-    the front for instant Premiere import.
+    For target_codec="prores", video always re-encodes to ProRes 422 Proxy —
+    there is no copy branch, because a source that is already H.264/VP9/AV1
+    can never be stream-copied into a ProRes-legal file. Audio still follows
+    the same AAC rule as above.
+
+    Every combination gets -movflags +faststart, which moves the mp4/mov
+    index to the front for instant Premiere import.
 
     Pure — no I/O, no logging, no locking. The caller applies log_message and
     needs_gate itself."""
     vcodec = vcodec.strip().lower()
     acodec = acodec.strip().lower()
-
     codec_case = _codec_case(vcodec)
-    will_transcode = TRANSCODE_TO_H264 and codec_case != "h264"
 
-    # Only called when a transcode is actually needed — keeps the NVENC
-    # detection subprocess probe (see _h264_encoder) off the path for
-    # downloads that never transcode.
-    #
-    # The copy branch stays a bare list rather than an Encoder: "copy" is the
-    # *absence* of an encoder, and folding it in would widen kind with a value
-    # needs_gate can never see.
-    encoder = None
-    if will_transcode:
-        encoder = _h264_encoder()
+    if target_codec == "prores":
+        # Always re-encodes, so there is no NVENC-style detection to defer —
+        # unlike _h264_encoder, this never needs to probe the machine.
+        encoder = _PRORES_ENCODER
         video_args = encoder.args
+        will_transcode = True
+        if codec_case == "unknown":
+            # Unlike the H.264 "unknown" case below, this doesn't change what
+            # happens next — a ProRes merge always re-encodes regardless of
+            # the source codec. Still logged at warn: it's the same early-
+            # warning signal ADR-0002 relies on for a yt-dlp payload change,
+            # just without a decision riding on it here.
+            log_message = (
+                f"  Could not determine the source video codec — transcoding "
+                f"to ProRes 422 Proxy ({encoder.name}) anyway; a ProRes merge "
+                f"always re-encodes, so this doesn't change what happens next."
+            )
+            log_level = "warn"
+        else:
+            log_message = (
+                f"  Transcoding {vcodec or 'source'} to ProRes 422 Proxy "
+                f"({encoder.name}) for editing performance — this is slower "
+                f"and much larger than a stream copy…"
+            )
+            log_level = "info"
     else:
-        video_args = ["-c:v", "copy"]
+        will_transcode = TRANSCODE_TO_H264 and codec_case != "h264"
 
-    log_message, log_level = None, "info"
-    if codec_case != "h264" and not TRANSCODE_TO_H264:
-        log_message = (
-            f"  Keeping {vcodec or 'source'} video untouched (stream copy) — "
-            f"Premiere 2023+ decodes it natively. Set TRANSCODE_TO_H264=True "
-            f"for older Premiere."
-        )
-    elif will_transcode and codec_case == "unknown":
-        # Say what actually happened. Claiming the source was non-H.264 here
-        # is a guess dressed as a fact, and it sent editors looking for a VP9
-        # source that was H.264 all along. Transcoding anyway is the deliberate
-        # trade: the container is already committed to mp4, so copying an
-        # unidentified stream risks the VP9-in-mp4 artifact this module exists
-        # to prevent, and a transcode is always container-legal.
-        log_message = (
-            f"  Could not determine the source video codec — transcoding to "
-            f"H.264 ({encoder.name}) so the mp4 container is guaranteed legal. "
-            f"This is slower than a stream copy; if it keeps happening, "
-            f"yt-dlp's callback payload has probably changed shape."
-        )
-        log_level = "warn"
-    elif will_transcode:
-        log_message = (
-            f"  >1080p source is {vcodec} — transcoding to H.264 "
-            f"({encoder.name}) for Premiere compatibility (this takes longer)…"
-        )
+        # Only called when a transcode is actually needed — keeps the NVENC
+        # detection subprocess probe (see _h264_encoder) off the path for
+        # downloads that never transcode.
+        #
+        # The copy branch stays a bare list rather than an Encoder: "copy" is
+        # the *absence* of an encoder, and folding it in would widen kind
+        # with a value needs_gate can never see.
+        encoder = None
+        if will_transcode:
+            encoder = _h264_encoder()
+            video_args = encoder.args
+        else:
+            video_args = ["-c:v", "copy"]
 
-    audio_args = (
-        [] if acodec.startswith(_AAC_ACODEC_PREFIXES)
-        else ["-c:a", "aac", "-b:a", "192k"]
-    )
+        log_message, log_level = None, "info"
+        if codec_case != "h264" and not TRANSCODE_TO_H264:
+            log_message = (
+                f"  Keeping {vcodec or 'source'} video untouched (stream copy) — "
+                f"Premiere 2023+ decodes it natively. Set TRANSCODE_TO_H264=True "
+                f"for older Premiere."
+            )
+        elif will_transcode and codec_case == "unknown":
+            # Say what actually happened. Claiming the source was non-H.264
+            # here is a guess dressed as a fact, and it sent editors looking
+            # for a VP9 source that was H.264 all along. Transcoding anyway
+            # is the deliberate trade: the container is already committed to
+            # mp4, so copying an unidentified stream risks the VP9-in-mp4
+            # artifact this module exists to prevent, and a transcode is
+            # always container-legal.
+            log_message = (
+                f"  Could not determine the source video codec — transcoding to "
+                f"H.264 ({encoder.name}) so the mp4 container is guaranteed legal. "
+                f"This is slower than a stream copy; if it keeps happening, "
+                f"yt-dlp's callback payload has probably changed shape."
+            )
+            log_level = "warn"
+        elif will_transcode:
+            log_message = (
+                f"  >1080p source is {vcodec} — transcoding to H.264 "
+                f"({encoder.name}) for Premiere compatibility (this takes longer)…"
+            )
+
+    audio_args = _audio_merge_args(acodec)
     merge_args = [*video_args, *audio_args, "-movflags", "+faststart"]
 
-    # Serialize heavy video encodes across all download threads — but only
-    # the RAM-hungry libx264 path (concurrent 4K software encodes ≈ 6GB+ and
-    # can OOM the machine). NVENC buffers on the GPU, so concurrent NVENC
-    # encodes are cheap on system RAM — don't gate them, or a 4K batch
-    # needlessly encodes one-at-a-time.
-    needs_gate = will_transcode and encoder.kind == "libx264"
+    # Serialize heavy video encodes across all download threads — every
+    # software encoder (libx264, prores_ks) stacks meaningful RAM/CPU per
+    # concurrent encode, unlike NVENC which buffers on the GPU and is cheap
+    # to run several of at once. Gate everything except NVENC rather than
+    # naming libx264 specifically, so a future software encoder target
+    # doesn't have to remember to opt in.
+    needs_gate = will_transcode and encoder.kind != "nvenc"
 
     return TranscodePlan(
         merge_args=merge_args,
@@ -322,6 +408,12 @@ def plan_transcode(vcodec: str, acodec: str) -> TranscodePlan:
 # There is no acquire/release pair to call from outside, because a caller that
 # can acquire is a caller that can forget to release.
 _TRANSCODE_GATE = threading.Lock()
+
+# The container commitment container_for() makes, in reverse: which codec a
+# forced container promised. Any container not listed here (mkv, mp4/mkv,
+# opus) made no promise, so _MergeSession.verify() skips it — a legitimate,
+# un-transcoded output must not be probed.
+_CONTAINER_COMMITMENTS = {"mp4": "h264", "mov": "prores"}
 
 
 class _MergeSession:
@@ -350,10 +442,14 @@ class _MergeSession:
         self._log = log
         self._holding_gate = False
         # The container commitment, taken straight from the value that went
-        # into ydl_opts so there is no second source of truth. "mp4" means we
-        # forced an mp4 before any codec was known, on the promise that a
-        # transcode would make it legal — a promise verify() collects on.
-        self._committed_to_mp4 = container == "mp4"
+        # into ydl_opts so there is no second source of truth. "mp4" or "mov"
+        # means we forced that container before any codec was known, on the
+        # promise that a transcode would make it legal — a promise verify()
+        # collects on. Keyed off the container rather than a separately
+        # passed target_codec because container_for() already encodes this
+        # one-to-one (mp4 <-> h264, mov <-> prores) — a second parameter here
+        # would just be a second source of truth for the same fact.
+        self._committed_codec = _CONTAINER_COMMITMENTS.get(container)
         # Merged outputs, in the order yt-dlp produced them. A playlist runs
         # several merges inside one download call, so this cannot be a single
         # slot without silently verifying only the last entry.
@@ -397,26 +493,37 @@ class _MergeSession:
     def verify(self) -> bool:
         """Collect on the container commitment, by measurement.
 
-        mp4 was forced before any codec was known, on the promise that a
+        mp4/mov was forced before any codec was known, on the promise that a
         transcode would follow. Rather than ask whether that transcode was
         recorded — the bookkeeping that lied in the first place — ffprobe every
-        file that merged successfully. An H.264 stream copy reads back as h264
-        and passes; a transcode that was silently skipped reads back as vp9 and
-        fails. Nothing this consults is capable of lying.
+        file that merged successfully. A stream in the committed codec reads
+        back as such and passes; a transcode that was silently skipped reads
+        back as something else and fails. Nothing this consults is capable of
+        lying.
 
         Runs after the download call rather than at each "finished", because
         FFmpegMetadata and EmbedThumbnail rewrite the file after the merger.
         """
-        if not self._committed_to_mp4:
+        if self._committed_codec is None:
             return True
+        # Referenced by name here, not via a dict built at module-import time
+        # (that would freeze in the pre-patch function object) — tests patch
+        # transcode_plan.verify_h264_output/verify_prores_output directly, and
+        # a bare name is looked up in the module's globals at call time, same
+        # as the single-codec version this replaced.
+        verify_output = (
+            verify_h264_output if self._committed_codec == "h264"
+            else verify_prores_output
+        )
         ok = True
         for path in self._finished:
             if not Path(path).exists():
-                self._log(f"  Could not locate merged output for verification "
-                          f"({Path(path).name}) — check the file manually "
-                          f"before importing.", "warn")
+                self._log(f"  Output verification failed: merged file is "
+                          f"missing on disk ({Path(path).name}) — marking "
+                          f"this download failed.", "error")
+                ok = False
                 continue
-            if not verify_h264_output(path, self._log):
+            if not verify_output(path, self._log):
                 ok = False
         return ok
 
@@ -448,12 +555,12 @@ def merge_session(log: LogFn, container: str) -> _MergeSession:
 _ffprobe_missing_reported = False
 
 
-def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
+def _verify_output_codec(path: "Path | str", log: LogFn, want_codec: str, want_label: str) -> bool:
     """ffprobe a merged file to confirm its video stream really is decodable
-    H.264 — catching both a silently-truncated/corrupt output (crashed
+    `want_codec` — catching both a silently-truncated/corrupt output (crashed
     encoder, full disk, OOM-killed ffmpeg) and a transcode that should have
     run and didn't, either of which would otherwise only be discovered when
-    the file fails to open in Premiere later."""
+    the file fails to open in the NLE later."""
     global _ffprobe_missing_reported
     try:
         proc = subprocess.run(
@@ -475,10 +582,24 @@ def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
     # even though only codec_name was requested — take the first CSV field.
     line = (proc.stdout or "").strip().splitlines()[0] if proc.stdout else ""
     codec = line.split(",")[0]
-    if proc.returncode == 0 and codec == "h264":
-        log("  Verified: output is clean H.264 — safe for any Premiere version.", "info")
+    if proc.returncode == 0 and codec == want_codec:
+        log(f"  Verified: output is clean {want_label} — safe for any Premiere "
+            f"version.", "info")
         return True
     log(f"  Output verification FAILED (codec={codec or 'unreadable'}, expected "
-        f"h264) — {Path(path).name} is corrupt or was never transcoded. Marking "
-        f"this download failed.", "error")
+        f"{want_codec}) — {Path(path).name} is corrupt or was never transcoded. "
+        f"Marking this download failed.", "error")
     return False
+
+
+def verify_h264_output(path: "Path | str", log: LogFn) -> bool:
+    """See _verify_output_codec — the H.264 merge target's verifier."""
+    return _verify_output_codec(path, log, "h264", "H.264")
+
+
+def verify_prores_output(path: "Path | str", log: LogFn) -> bool:
+    """See _verify_output_codec — the ProRes merge target's verifier. ffprobe
+    reports every ProRes profile (Proxy included) as codec_name "prores"; the
+    profile itself isn't distinguished here, only that a real ProRes stream
+    is what actually landed on disk."""
+    return _verify_output_codec(path, log, "prores", "ProRes")
