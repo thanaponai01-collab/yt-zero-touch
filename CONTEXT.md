@@ -21,10 +21,12 @@ video and audio streams into one file. Everything this project does to make a
 file Premiere-safe happens here: container, codec, faststart.
 
 **Merge session** (`core.transcode._MergeSession`) — the owner of one
-download's merge lifecycle. Holds the transcode gate, the merged files, and
-their verification. Scoped to the *download*, not to one merge, because yt-dlp
-reports a merge starting and finishing through two separate callbacks and one
-download call can serve many merges. See ADR-0001.
+download's merge lifecycle. Holds the transcode gate, the files that landed,
+and their verification. Scoped to the *download*, not to one merge, because
+yt-dlp reports a merge starting and finishing through two separate callbacks
+and one download call can serve many merges — and because a download that
+never merges at all still has a container commitment to answer for. See
+ADR-0001, ADR-0003.
 
 **Container commitment** — the choice of output container, forced before any
 codec is known because `YoutubeDL()` reads `merge_output_format` at

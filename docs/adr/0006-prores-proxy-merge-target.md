@@ -2,7 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-07
-- **Context:** `transcode_plan.py`, `ytdlp_skill._download_api`, `app.py`
+- **Context:** `core/transcode.py`, `engines/ytdlp_engine._download_api`,
+  `ui/app.py`
 
 ## Context
 
@@ -26,7 +27,7 @@ uncommon one.
 ## Decision
 
 Add ProRes 422 Proxy as a second `target_codec`, selected per download (the
-"ProRes Proxy" checkbox next to Quality in `app.py`, or `--prores` on the
+"ProRes Proxy" pill next to Quality in `ui/app.py`, or `--prores` on the
 watcher CLI) — not a module-level constant like `TRANSCODE_TO_H264`, because
 the right choice genuinely varies by *what this particular download is for*,
 not by the machine it runs on.

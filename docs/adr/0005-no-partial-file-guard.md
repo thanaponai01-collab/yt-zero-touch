@@ -2,8 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-13
-- **Context:** `watcher._harvest_completed` (was `watcher.watch`), former
-  `ytdlp_skill.has_partial_files`
+- **Context:** `ui/cli/watcher._harvest_completed` (was `watcher.watch`),
+  former `ytdlp_skill.has_partial_files` (deleted)
 - **Supersedes:** nothing; **relies on** ADR-0003
 
 ## Read this before adding a `.part` check back

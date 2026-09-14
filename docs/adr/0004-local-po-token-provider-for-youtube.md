@@ -9,7 +9,7 @@
 YouTube's anti-bot check increasingly demands a GVS ("Google Video Server") PO
 Token before it will serve format URLs to the https protocol, not just the
 signature-cipher JS challenge yt-dlp already solves with deno (see the
-`remote_components`/`js_runtimes` comment in `ytdlp_skill.py`). Without a valid
+`remote_components`/`js_runtimes` comment in `engines/ytdlp_engine.py`). Without a valid
 PO Token, a format either gets silently skipped ("require a GVS PO Token which
 was not provided") or, worse, starts downloading and then 403s mid-stream —
 which is what a plain browser-cookie session was standing in for: cookies
