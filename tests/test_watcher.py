@@ -9,6 +9,9 @@ it — a truthy DownloadOutcome is recorded as done, whatever else is on disk.
 Run with:  python -m pytest tests/ -q     (or: python -m unittest -v)
 """
 
+import contextlib
+import inspect
+import io
 import json
 import sys
 import tempfile
@@ -16,14 +19,13 @@ import threading
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from yt_zero_touch.ui.cli import watcher  # noqa: E402
-from yt_zero_touch.services.orchestrator import (  # noqa: E402
-    DownloadOutcome,
-    FailureClass,
-)
+from yt_zero_touch.core.failures import FailureClass  # noqa: E402
+from yt_zero_touch.core.models import DownloadOutcome  # noqa: E402
 
 
 def _settled(value) -> Future:
@@ -129,6 +131,73 @@ class TestHarvestBookkeeping(HarvestTestCase):
 
         self.assertEqual(list(in_flight), ["https://x/pending"])
         self.assertEqual(self.stats, {"detected": 0, "downloaded": 0, "failed": 0})
+
+
+class TestWatcherDefaultPaths(unittest.TestCase):
+    """The CLI's defaults used to resolve one directory short, landing on
+    src/urls.txt and src/downloads/ instead of the repo root the README and
+    run.bat both mean - so the watcher silently watched an empty file."""
+
+    def test_base_dir_resolves_to_the_repo_root(self):
+        base = Path(watcher.__file__).resolve().parents[4]
+        self.assertTrue((base / "pyproject.toml").exists(),
+                        f"watcher base resolved to {base}, not the repo root")
+        self.assertNotEqual(base.name, "src")
+
+    def test_history_file_is_shared_with_the_gui_by_default(self):
+        # Both front ends must skip the same URLs; two rival history files
+        # means the first watcher run re-downloads everything the GUI has.
+        base = Path(watcher.__file__).resolve().parents[4]
+        src = inspect.getsource(watcher.main)
+        self.assertIn('history_file=base / "processed_urls.json"', src)
+        self.assertEqual((base / "processed_urls.json").name,
+                         "processed_urls.json")
+
+    def test_watch_honours_an_explicit_history_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            shared = Path(tmp) / "processed_urls.json"
+            shared.write_text(json.dumps(["https://x/already"]), encoding="utf-8")
+            captured = {}
+
+            def _fake_load(path):
+                captured["path"] = Path(path)
+                return {"https://x/already"}
+
+            # watch() prints a box-drawing banner; a cp1252 test console
+            # can't encode it and that is not what this test is about.
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 mock.patch.object(watcher, "load_history", _fake_load), \
+                 mock.patch.object(watcher, "Downloader", _NullDownloader), \
+                 mock.patch.object(watcher.time, "sleep", _StopAfterFirstPoll()):
+                try:
+                    watcher.watch(
+                        url_file=Path(tmp) / "urls.txt", out_dir=out,
+                        audio_only=False, dry_run=True, history_file=shared,
+                    )
+                except KeyboardInterrupt:
+                    pass
+
+            self.assertEqual(captured["path"], shared)
+            self.assertNotEqual(captured["path"], out / "processed_urls.json")
+
+
+class _NullDownloader:
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _StopAfterFirstPoll:
+    """watch() loops forever; let it complete exactly one pass."""
+
+    def __call__(self, _seconds):
+        raise KeyboardInterrupt
 
 
 if __name__ == "__main__":

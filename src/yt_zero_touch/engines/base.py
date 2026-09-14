@@ -1,33 +1,18 @@
 """
-Base Engine Interface.
-======================
-Contract for all concrete download adapters (yt-dlp, gallery-dl, gdown).
+Shared engine types.
+====================
+The one thing all three adapters (yt-dlp, gallery-dl, gdown) genuinely have
+in common: how they report progress back to whichever front end invoked them.
+
+There is deliberately no BaseEngine ABC here. Routing between the adapters is
+a handful of inline branches in `download_ytdlp` — gallery mode, a Drive id,
+an image host yt-dlp found nothing on — driven by facts about the URL and the
+request, not by polymorphism. An ABC over three adapters that nothing ever
+dispatched through was documentation pretending to be code.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 LogFn = Callable[[str, str], None]
-
-
-class BaseEngine(ABC):
-    """Abstract download engine."""
-
-    @abstractmethod
-    def can_handle(self, url: str, **kwargs: Any) -> bool:
-        """Return True if this engine can process the given URL."""
-        pass
-
-    @abstractmethod
-    def download(
-        self,
-        url: str,
-        out_dir: Path,
-        log: LogFn,
-        **kwargs: Any,
-    ) -> bool:
-        """Download URL to out_dir. Returns True on success."""
-        pass

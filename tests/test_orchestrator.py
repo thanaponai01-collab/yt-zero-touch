@@ -15,13 +15,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from yt_zero_touch.services.orchestrator import (  # noqa: E402
-    is_permanent_error,
+from yt_zero_touch.core.failures import (  # noqa: E402
     classify_failure,
+    is_permanent_error,
+)
+from yt_zero_touch.core.models import BatchPolicy, build_output_template  # noqa: E402
+from yt_zero_touch.services.orchestrator import (  # noqa: E402
     download_with_retry,
-    build_output_template,
     run_batch,
-    BatchPolicy,
 )
 
 

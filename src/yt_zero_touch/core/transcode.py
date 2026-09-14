@@ -20,11 +20,17 @@ LogFn = Callable[[str, str], None]
 # Master switch
 # ---------------------------------------------------------------------------
 
-# Premiere 2023+ decodes VP9 and AV1 natively, so a >1080p source can be
-# muxed through untouched: the merge becomes a pure stream copy (seconds
-# instead of minutes) *and* the output is bit-identical to what YouTube
-# served — no H.264 generation loss. Flip to True only if the footage has to
-# open in a pre-2023 Premiere, which needs the transcode below.
+# True: a non-H.264 source (VP9/AV1, i.e. anything >1080p from YouTube) is
+# re-encoded to H.264 during the merge, so the output opens in any Premiere
+# version. This is what ships, and ADR-0001/0002/0003 all assume it — the
+# mp4 container is committed before any codec is known, on the promise that
+# this transcode makes it legal.
+#
+# Flip to False only for a Premiere 2023+ machine: it decodes VP9 and AV1
+# natively, so the merge becomes a pure stream copy (seconds instead of
+# minutes) and the output is bit-identical to what YouTube served, with no
+# H.264 generation loss. `container_for` then relaxes to "mp4/mkv" because
+# mp4 can no longer be guaranteed legal.
 TRANSCODE_TO_H264 = True
 
 # ---------------------------------------------------------------------------
@@ -64,10 +70,12 @@ class Encoder:
 
 _h264_encoder_cache: Encoder | None = None
 _h264_encoder_cache_lock = threading.Lock()
+_nvenc_cache: bool | None = None
+_nvenc_cache_lock = threading.Lock()
 
 
 def _nvenc_available() -> bool:
-    """True if this machine can actually encode with h264_nvenc."""
+    """Probe ffmpeg for a working h264_nvenc. Prefer nvenc_available()."""
     try:
         proc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -80,12 +88,22 @@ def _nvenc_available() -> bool:
         return False
 
 
+def nvenc_available() -> bool:
+    """True if this machine can encode with h264_nvenc. Spawns ffmpeg once
+    per process; every later caller gets the cached answer."""
+    global _nvenc_cache
+    with _nvenc_cache_lock:
+        if _nvenc_cache is None:
+            _nvenc_cache = _nvenc_available()
+        return _nvenc_cache
+
+
 def _h264_encoder() -> Encoder:
     global _h264_encoder_cache
     with _h264_encoder_cache_lock:
         if _h264_encoder_cache is None:
             _h264_encoder_cache = (
-                Encoder(_H264_NVENC_ARGS, "nvenc") if _nvenc_available()
+                Encoder(_H264_NVENC_ARGS, "nvenc") if nvenc_available()
                 else Encoder(_H264_TRANSCODE_ARGS, "libx264")
             )
         return _h264_encoder_cache
@@ -216,6 +234,7 @@ class _MergeSession:
         self._committed_codec = _CONTAINER_COMMITMENTS.get(container)
         self._merged: list[str] = []
         self._finished: list[str] = []
+        self._outputs: list[str] = []
 
     def __enter__(self) -> _MergeSession:
         return self
@@ -240,6 +259,19 @@ class _MergeSession:
             self._finished.append(landed)
         self._free_gate()
 
+    def output_landed(self, filepath: str | None) -> None:
+        """Record the file yt-dlp finally moved into place.
+
+        This is the only signal that exists when *no merge ran at all* — a
+        single pre-muxed format satisfies the format selector, the merger
+        never fires, and `merge_output_format` was never applied. The
+        container commitment still stands, so the output still has to be
+        probed; before this, that path skipped verification entirely and a
+        VP9 .webm could land under an mp4 commitment.
+        """
+        if filepath:
+            self._outputs.append(filepath)
+
     def verify(self) -> bool:
         if self._committed_codec is None:
             return True
@@ -247,10 +279,14 @@ class _MergeSession:
             verify_h264_output if self._committed_codec == "h264"
             else verify_prores_output
         )
+        # Prefer the landed-output signal: it is yt-dlp's last word on where
+        # the file actually is, and it covers the no-merge case too. Fall
+        # back to the merge signal so a rename upstream degrades to the old
+        # merge-only coverage rather than silently verifying nothing.
         ok = True
-        for path in self._finished:
+        for path in (self._outputs or self._finished):
             if not Path(path).exists():
-                self._log(f"  Output verification failed: merged file is "
+                self._log(f"  Output verification failed: the finished file is "
                           f"missing on disk ({Path(path).name}) — marking "
                           f"this download failed.", "error")
                 ok = False

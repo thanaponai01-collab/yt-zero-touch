@@ -325,10 +325,25 @@ class TestMergeSessionGate(GateFreeAfterTest, unittest.TestCase):
 class TestH264EncoderSelection(unittest.TestCase):
     def setUp(self):
         self._saved = transcode_plan._h264_encoder_cache
+        self._saved_nvenc = transcode_plan._nvenc_cache
         transcode_plan._h264_encoder_cache = None
+        transcode_plan._nvenc_cache = None
 
     def tearDown(self):
         transcode_plan._h264_encoder_cache = self._saved
+        transcode_plan._nvenc_cache = self._saved_nvenc
+
+    def test_nvenc_probe_is_cached_across_callers(self):
+        # The GUI header badge and the encoder selection both need this
+        # answer; before nvenc_available() they each spawned their own
+        # ffmpeg. One probe per process, whoever asks first.
+        with mock.patch.object(
+            transcode_plan, "_nvenc_available", return_value=True
+        ) as probe:
+            self.assertTrue(transcode_plan.nvenc_available())
+            transcode_plan._h264_encoder()
+            self.assertTrue(transcode_plan.nvenc_available())
+            self.assertEqual(probe.call_count, 1)
 
     def test_prefers_nvenc_when_available(self):
         with mock.patch.object(transcode_plan, "_nvenc_available", return_value=True):

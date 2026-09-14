@@ -148,6 +148,11 @@ class DownloadApiHarness(GateFreeAfterTest, unittest.TestCase):
         path.write_bytes(b"not really an mp4")
         return str(path)
 
+    def move_event(self, status, filepath):
+        """MoveFiles — yt-dlp's last postprocessor. Fires on every download,
+        merge or not, carrying the path the media file landed at."""
+        return ("MoveFiles", status, {"filepath": filepath})
+
     def merge_event(self, status, vcodec="vp9", acodec="opus", filepath=None):
         return ("Merger", status, {
             "filepath": filepath,
@@ -347,6 +352,55 @@ class TestMergeLifecycle(DownloadApiHarness):
         ])
         self.assertTrue(run.ok)
         self.assertEqual(run.merger_args_at_merge[0][:2], ["-c:v", "copy"])
+
+
+class TestDownloadsThatNeverMerge(DownloadApiHarness):
+    """`bestvideo+bestaudio/best` can fall through to a single pre-muxed
+    format. No merge runs, so `merge_output_format` never applies and the
+    Merger callback never fires — but the mp4 container commitment
+    (ADR-0001) was still made, so the output still has to be probed. This
+    path used to skip verification entirely and pass anything."""
+
+    def setUp(self):
+        super().setUp()
+        self._flag = mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True)
+        self._flag.start()
+        self.addCleanup(self._flag.stop)
+
+    def test_single_premuxed_h264_file_is_verified_and_passes(self):
+        landed = self.merged_file("clip.mp4")
+        run = self.run_download(
+            events=[self.move_event("finished", landed)], probe_codec="h264")
+        self.assertTrue(run.ok)
+        self.assertEqual(run.verified, [landed])
+
+    def test_single_premuxed_vp9_file_fails_the_download(self):
+        # The whole point: a VP9 .webm landing under an mp4 commitment is
+        # exactly the artifact ADR-0002 forces a transcode to prevent.
+        landed = self.merged_file("clip.webm")
+        run = self.run_download(
+            events=[self.move_event("finished", landed)], probe_codec="vp9")
+        self.assertFalse(run.ok)
+        self.assertEqual(run.verified, [landed])
+        self.assertIn("Output verification FAILED", run.log_text())
+
+    def test_landed_path_is_preferred_over_the_merge_path(self):
+        # Both signals fire on a normal merge. MoveFiles is the later and
+        # more authoritative one, so it is what gets probed - once.
+        landed = self.merged_file("clip.mp4")
+        run = self.run_download(events=[
+            self.merge_event("started", filepath=landed),
+            self.merge_event("finished", filepath=landed),
+            self.move_event("finished", landed),
+        ])
+        self.assertTrue(run.ok)
+        self.assertEqual(run.verified, [landed])
+
+    def test_missing_landed_file_fails_rather_than_passing_quietly(self):
+        run = self.run_download(
+            events=[self.move_event("finished", str(self.tmp / "gone.mp4"))])
+        self.assertFalse(run.ok)
+        self.assertIn("missing on disk", run.log_text())
 
 
 class TestOutputVerification(DownloadApiHarness):

@@ -13,11 +13,9 @@ Tuned for Premiere Pro compatibility:
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
-import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from yt_zero_touch.core.format_policy import FORMAT_SORT
 from yt_zero_touch.core.models import (
@@ -32,12 +30,11 @@ from yt_zero_touch.core.transcode import (
     merge_session,
     plan_transcode,
 )
-from yt_zero_touch.engines.base import BaseEngine, LogFn
+from yt_zero_touch.engines.base import LogFn
 from yt_zero_touch.engines.gallery_engine import download_gallery, GALLERY_DL_OK
 from yt_zero_touch.engines.gdrive_engine import extract_gdrive_id, download_gdrive
 from yt_zero_touch.services.resolver import (
     resolve_url,
-    _launch_temp_browser,
     _PLAYWRIGHT_OK,
     _BROWSER_ARGS,
 )
@@ -159,7 +156,7 @@ class _FFmpegSectionWatchdog:
             _section_watchdogs.pop(threading.get_ident(), None)
 
 
-def _log_section_timeout(sections: Any, log: Callable) -> None:
+def _log_section_timeout(log: LogFn) -> None:
     mins = _SECTION_DOWNLOAD_TIMEOUT_S // 60
     log(f"  Section download exceeded {mins} min and was aborted.", "error")
     log("  ffmpeg reads from the start of the video to reach the clip, so a "
@@ -315,10 +312,19 @@ def _download_api(
     container = container_for(audio_only, target_codec)  # type: ignore
     merge = merge_session(log, container)
 
-    def _tune_merge_args_for_premiere(status: dict):
+    def _on_postprocessor(status: dict):
+        info = status.get("info_dict") or {}
+        # MoveFiles is yt-dlp's last postprocessor (YoutubeDL.process_info),
+        # and its info_dict["filepath"] is where the media file actually
+        # landed - whether or not a merge ran. That is what makes the
+        # container commitment checkable on a single pre-muxed format, which
+        # the Merger callback below never sees.
+        if status.get("postprocessor") == "MoveFiles":
+            if status.get("status") == "finished":
+                merge.output_landed(info.get("filepath"))
+            return
         if status.get("postprocessor") != "Merger":
             return
-        info = status.get("info_dict") or {}
         if status.get("status") == "finished":
             merge.merge_finished(info.get("filepath"))
             return
@@ -354,7 +360,7 @@ def _download_api(
         "postprocessors":                postprocessors,
         **({
             "postprocessor_args": {"merger": PRE_MERGE_DEFAULT_ARGS},
-            "postprocessor_hooks": [_tune_merge_args_for_premiere],
+            "postprocessor_hooks": [_on_postprocessor],
         } if not audio_only else {}),
         "format_sort":                   FORMAT_SORT,
         "socket_timeout":                60,
@@ -436,37 +442,40 @@ def _download_api(
                 with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ret = ydl.download([resolved])
             if watchdog is not None and watchdog.timed_out:
-                _log_section_timeout(sections, log)
+                _log_section_timeout(log)
                 return False
         if ret != 0:
             return False
         return merge.verify()
     except Exception as exc:
         if watchdog is not None and watchdog.timed_out:
-            _log_section_timeout(sections, log)
+            _log_section_timeout(log)
             return False
         log(f"  yt-dlp API error: {exc}", "error")
         return False
 
 
 class Downloader:
-    """Context manager that keeps one Chromium instance alive for all downloads."""
+    """Context manager that keeps one Chromium instance alive for all downloads
+    started on the thread that opened it."""
 
     def __init__(
         self,
         cookie_file: Path | str | None = None,
         log: LogFn = _print_log,
     ):
-        self.cookie_file = Path(cookie_file) if cookie_file else None
-        self.log         = log
-        self._lock       = threading.Lock()
-        self._pw         = None
-        self._browser    = None
+        self.cookie_file   = Path(cookie_file) if cookie_file else None
+        self.log           = log
+        self._lock         = threading.Lock()
+        self._pw           = None
+        self._browser      = None
+        self._owner_thread = None
 
     def __enter__(self):
         if _PLAYWRIGHT_OK and sync_playwright is not None:
-            self._pw      = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+            self._pw           = sync_playwright().start()
+            self._browser      = self._pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+            self._owner_thread = threading.get_ident()
         return self
 
     def __exit__(self, *_):
@@ -483,6 +492,7 @@ class Downloader:
                 except Exception:
                     pass
                 self._pw = None
+            self._owner_thread = None
 
     def download(
         self,
@@ -508,7 +518,16 @@ class Downloader:
     ) -> bool:
         ck = cookie_file or self.cookie_file
         with self._lock:
-            browser = self._browser
+            # Playwright's sync API is bound to the thread that started it: a
+            # worker thread touching this browser raises "cannot switch to a
+            # different thread", which killed every unknown-site resolve in
+            # the CLI watcher (it submits dl.download to a ThreadPoolExecutor).
+            # Off-thread callers get None, and resolve_urls launches its own
+            # short-lived browser instead - slower, but it actually resolves.
+            browser = (
+                self._browser
+                if self._owner_thread == threading.get_ident() else None
+            )
         return download_ytdlp(
             url,
             out_dir=out_dir,
@@ -530,11 +549,3 @@ class Downloader:
             player_client=player_client,
             _browser=browser,
         )
-
-
-class YtdlpEngine(BaseEngine):
-    def can_handle(self, url: str, **kwargs: Any) -> bool:
-        return True
-
-    def download(self, url: str, out_dir: Path, log: LogFn, **kwargs: Any) -> bool:
-        return download_ytdlp(url, out_dir=out_dir, log=log, **kwargs)

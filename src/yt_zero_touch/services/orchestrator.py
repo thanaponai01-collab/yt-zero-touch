@@ -16,9 +16,7 @@ from typing import Callable
 from yt_zero_touch.core.failures import (
     _CLIENT_RETRY,
     _LOGIN,
-    FailureClass,
     classify_failure,
-    is_permanent_error,
 )
 from yt_zero_touch.core.history import HistoryStore, save_history
 from yt_zero_touch.core.models import (
@@ -32,7 +30,6 @@ from yt_zero_touch.services.resolver import (
     _PLAYWRIGHT_OK,
     _launch_temp_browser,
     _print_log,
-    resolve_url,
     resolve_urls,
 )
 
@@ -119,17 +116,28 @@ def download_with_retry(
         last_errors = captured_errors
         failure = classify_failure(captured_errors)
 
+        # Both fallbacks below re-classify on captured_errors[mark:] - the
+        # slice the fallback attempt itself produced. Over the whole buffer the
+        # failed first try's text is still present and always re-wins, which
+        # made the re-classification a no-op: a bot-checked URL whose fallback
+        # then died of a network blip was declared a permanent "supply
+        # cookies" and skipped every remaining retry. A fallback that logs
+        # nothing classifiable counts as transient - it did not reproduce the
+        # wall - and the final classify over the whole buffer still reports the
+        # login remedy if every attempt is exhausted.
         if failure is _LOGIN and login_wall_fallback_fn is not None:
             login_wall_fallback_fn, fallback_fn = None, login_wall_fallback_fn
             base_log(f"  {failure.label} with the default client - trying an "
                      "alternate player client before giving up...", "warn")
+            mark = len(captured_errors)
             if fallback_fn(log_capture, progress_hook):
                 return DownloadOutcome(ok=True)
-            failure = classify_failure(captured_errors)
+            failure = classify_failure(captured_errors[mark:])
         elif failure is _CLIENT_RETRY and client_retry_fallback_fn is not None:
             client_retry_fallback_fn, fallback_fn = None, client_retry_fallback_fn
             base_log(f"  {failure.label} with the default client - trying an "
                      "alternate player client before giving up...", "warn")
+            mark = len(captured_errors)
             if fallback_fn(log_capture, progress_hook):
                 return DownloadOutcome(ok=True)
             # The default client is confirmed broken (that's what _CLIENT_RETRY
@@ -139,7 +147,7 @@ def download_with_retry(
             # itself (timeout, transient network blip, ...) is a different
             # problem the normal retry/backoff below still handles.
             download_fn = fallback_fn
-            failure = classify_failure(captured_errors)
+            failure = classify_failure(captured_errors[mark:])
 
         if failure and failure.permanent:
             base_log(f"  {failure.label} — not retrying. {failure.remedy}", "warn")
