@@ -20,31 +20,33 @@ that choice was deliberate.
 video and audio streams into one file. Everything this project does to make a
 file Premiere-safe happens here: container, codec, faststart.
 
-**Merge session** (`transcode_plan._MergeSession`) — the owner of one
-download's merge lifecycle. Holds the transcode gate, the merged files, and
-their verification. Scoped to the *download*, not to one merge, because yt-dlp
-reports a merge starting and finishing through two separate callbacks and one
-download call can serve many merges. See ADR-0001.
+**Merge session** (`core.transcode._MergeSession`) — the owner of one
+download's merge lifecycle. Holds the transcode gate, the files that landed,
+and their verification. Scoped to the *download*, not to one merge, because
+yt-dlp reports a merge starting and finishing through two separate callbacks
+and one download call can serve many merges — and because a download that
+never merges at all still has a container commitment to answer for. See
+ADR-0001, ADR-0003.
 
 **Container commitment** — the choice of output container, forced before any
 codec is known because `YoutubeDL()` reads `merge_output_format` at
 construction. When `TRANSCODE_TO_H264` is on this commits to mp4 on the
 *promise* that a transcode will make it legal; a ProRes merge target commits
 to mov the same way. The merge session collects on that promise. See
-ADR-0003, ADR-0005.
+ADR-0003, ADR-0006.
 
-**Merge target** (`transcode_plan.TargetCodec`) — which codec a download's
+**Merge target** (`core.transcode.TargetCodec`) — which codec a download's
 merge step re-encodes into: `"h264"` (default — small, Premiere-native,
 stream-copies when the source already is H.264) or `"prores"` (ProRes 422
 Proxy — intra-only, edit-friendly, always re-encodes, much larger). Chosen
-per download, not per machine — see ADR-0005.
+per download, not per machine — see ADR-0006.
 
 **Transcode gate** — a process-wide, non-reentrant lock permitting one heavy
 software encode at a time. Concurrent 4K libx264 encodes stack multi-GB
 allocations and can OOM the machine. NVENC buffers on the GPU and is not
 gated. Only the merge session may touch it.
 
-**Encoder** (`transcode_plan.Encoder`) — the H.264 encoder a transcode will
+**Encoder** (`core.transcode.Encoder`) — the H.264 encoder a transcode will
 run, in the two vocabularies that must agree about it. Its **kind** (`nvenc`,
 `libx264`) is for *branching* — it answers "does this need the transcode
 gate". Its **name** (`h264_nvenc`, `libx264`) is the ffmpeg encoder, for

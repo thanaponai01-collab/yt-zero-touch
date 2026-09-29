@@ -14,7 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from yt_zero_touch.core.history import HistoryStore, load_history, save_history
+from yt_zero_touch.core.history import load_history, save_history
 from yt_zero_touch.core.models import URL_RE
 from yt_zero_touch.engines.ytdlp_engine import Downloader
 from yt_zero_touch.services.orchestrator import (
@@ -132,10 +132,15 @@ def watch(
     gallery: bool = False,
     sections: str | None = None,
     target_codec: str = "h264",
+    history_file: Path | None = None,
 ):
     sub_langs = sub_langs or []
     out_dir.mkdir(parents=True, exist_ok=True)
-    history_file = out_dir / "processed_urls.json"
+    # Defaults beside the output folder only when nobody says otherwise;
+    # main() points it at the repo-root file the GUI already maintains, so
+    # the two front ends skip the same URLs instead of keeping rival
+    # histories and re-downloading each other's work.
+    history_file = history_file or (out_dir / "processed_urls.json")
     history = load_history(history_file)
     history_lock = threading.Lock()
     stats = {"detected": 0, "downloaded": 0, "failed": 0}
@@ -245,13 +250,15 @@ def watch(
                         except Exception:
                             pass
 
-                print(f"\n  Shutting down.")
+                print("\n  Shutting down.")
                 print(f"  Session stats : {stats}")
                 print(f"  Total history : {len(history)} URLs\n")
 
 
 def main():
-    base = Path(__file__).resolve().parent.parent.parent.parent
+    # .../<repo>/src/yt_zero_touch/ui/cli/watcher.py -> <repo>. parents[3] is
+    # src/, which is where the urls.txt and downloads/ defaults used to point.
+    base = Path(__file__).resolve().parents[4]
     if not check_dependencies():
         raise SystemExit(1)
 
@@ -285,6 +292,7 @@ def main():
         gallery=args.photos,
         sections=args.sections,
         target_codec=target_codec,
+        history_file=base / "processed_urls.json",
     )
 
 

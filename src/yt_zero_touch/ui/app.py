@@ -12,7 +12,6 @@ Windows 11 Fluent dark-theme design with zero checkboxes:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import threading
 import tkinter as tk
@@ -23,7 +22,7 @@ from typing import Callable
 from yt_zero_touch.core.config import AppSettings
 from yt_zero_touch.core.history import HistoryStore
 from yt_zero_touch.core.models import QUALITY_PRESETS, URL_RE, BatchPolicy
-from yt_zero_touch.core.transcode import _nvenc_available
+from yt_zero_touch.core.transcode import nvenc_available
 from yt_zero_touch.engines.ytdlp_engine import Downloader, YT_DLP_API_OK
 from yt_zero_touch.services.orchestrator import run_batch
 from yt_zero_touch.services.system import check_ffmpeg
@@ -230,7 +229,7 @@ class App(tk.Tk):
         right_hdr = tk.Frame(header, bg=COLORS["card"])
         right_hdr.grid(row=0, column=1, rowspan=2, sticky="e")
 
-        has_nvenc = _nvenc_available()
+        has_nvenc = nvenc_available()
         hw_text = "● NVENC HW Ready" if has_nvenc else "● FFmpeg (CPU)"
         hw_fg = COLORS["success"] if has_nvenc else COLORS["muted"]
 
@@ -777,10 +776,18 @@ class App(tk.Tk):
             self._queue_rows[idx] = iid
 
     def _on_item(self, idx: int, url: str, status: str, pct: float | None):
+        """orchestrator callback - update one queue row. Runs off-thread.
+
+        idx can exceed the row count _reset_queue pre-populated: a page URL
+        that embeds several videos (see resolver.resolve_urls) fans out into
+        one work item per video, so a row is created here on first sight.
+        """
         def _apply():
             iid = self._queue_rows.get(idx)
             if not iid:
-                return
+                iid = self.queue.insert(
+                    "", "end", values=(str(idx), url, "Queued", "-"), tags=("queued",))
+                self._queue_rows[idx] = iid
             lbl, _ = STATUS_STYLE.get(status, (status.capitalize(), COLORS["text"]))
             pct_str = f"{pct:.1f}%" if pct is not None else "-"
             self.queue.item(iid, values=(str(idx), url, lbl, pct_str), tags=(status,))

@@ -11,10 +11,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
-from yt_zero_touch.core.models import is_image_host
-from yt_zero_touch.engines.base import BaseEngine, LogFn
+from yt_zero_touch.engines.base import LogFn
 
 try:
     import gallery_dl as _gallery_dl  # noqa: F401
@@ -184,21 +182,3 @@ def download_gallery(
         log("  2) Keep that browser installed — the app borrows its session automatically.", "warn")
         log("  (Or pick your browser in the cookie dropdown / supply a cookies.txt.)", "warn")
     return False
-
-
-class GalleryEngine(BaseEngine):
-    def can_handle(self, url: str, **kwargs: Any) -> bool:
-        return kwargs.get("gallery", False) or is_image_host(url)
-
-    def download(self, url: str, out_dir: Path, log: LogFn, **kwargs: Any) -> bool:
-        cookie_file = kwargs.get("cookie_file")
-        browser_cookie = kwargs.get("browser_cookie")
-        force = kwargs.get("force", False)
-        return download_gallery(
-            url,
-            out_dir,
-            cookie_file=Path(cookie_file) if cookie_file else None,
-            browser_cookie=browser_cookie,
-            force=force,
-            log=log,
-        )

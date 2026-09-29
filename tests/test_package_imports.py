@@ -21,11 +21,10 @@ class TestPackageImports(unittest.TestCase):
             plan_transcode,
         )
         from yt_zero_touch.engines import (
-            BaseEngine,
             Downloader,
-            GalleryEngine,
-            GDriveEngine,
-            YtdlpEngine,
+            download_gallery,
+            download_gdrive,
+            download_ytdlp,
         )
         from yt_zero_touch.services import (
             check_dependencies,
@@ -37,9 +36,26 @@ class TestPackageImports(unittest.TestCase):
         )
 
         self.assertIsNotNone(yt_zero_touch.__version__)
-        self.assertTrue(issubclass(YtdlpEngine, BaseEngine))
-        self.assertTrue(issubclass(GalleryEngine, BaseEngine))
-        self.assertTrue(issubclass(GDriveEngine, BaseEngine))
+        for adapter in (download_ytdlp, download_gallery, download_gdrive):
+            self.assertTrue(callable(adapter))
+        self.assertTrue(callable(Downloader))
+
+    def test_every_source_dir_is_a_real_package(self):
+        # pyproject.toml uses setuptools' find_packages, which only walks
+        # directories containing __init__.py. A source dir missing one is
+        # dropped from the built wheel with no error - and both [project.scripts]
+        # entry points live under yt_zero_touch.ui, so the omission ships an
+        # install whose console scripts ImportError. Assert the built package
+        # list covers every directory that actually holds modules.
+        from setuptools import find_packages
+
+        src = Path(__file__).resolve().parent.parent / "src"
+        with_modules = {
+            str(d.relative_to(src)).replace("\\", "/").replace("/", ".")
+            for d in src.rglob("*")
+            if d.is_dir() and d.name != "__pycache__" and any(d.glob("*.py"))
+        }
+        self.assertEqual(with_modules - set(find_packages(where=str(src))), set())
 
 
 if __name__ == "__main__":

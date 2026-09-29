@@ -13,15 +13,16 @@ import threading
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from orchestrator import (  # noqa: E402
-    is_permanent_error,
+from yt_zero_touch.core.failures import (  # noqa: E402
     classify_failure,
+    is_permanent_error,
+)
+from yt_zero_touch.core.models import BatchPolicy, build_output_template  # noqa: E402
+from yt_zero_touch.services.orchestrator import (  # noqa: E402
     download_with_retry,
-    build_output_template,
     run_batch,
-    BatchPolicy,
 )
 
 
@@ -360,6 +361,26 @@ class TestRunBatch(unittest.TestCase):
         self.assertIn((1, "done"), terminal)
         self.assertIn((2, "failed"), terminal)
 
+
+    def test_a_page_with_several_videos_fans_out_into_one_download_each(self):
+        events = []
+        dl = _FakeDownloader({})
+        history = set()
+        result = run_batch(
+            ["http://page/a", "http://page/b"], BatchPolicy(out_dir=self.tmp), dl,
+            history=history, history_lock=threading.Lock(),
+            history_path=self.history_path, log=lambda *a, **k: None,
+            on_item=lambda i, u, st, p: events.append((i, u, st)),
+            resolve_fn=lambda url, **kw: (["http://v/1", "http://v/2"] if url.endswith("/a") else ["http://v/3"]),
+            playwright_ok=False,
+        )
+        self.assertEqual(sorted(c[0] for c in dl.calls), ["http://v/1", "http://v/2", "http://v/3"])
+        self.assertEqual(result.succeeded, 3)
+        self.assertEqual(sorted(i for i, _u, st in events if st == "queued"), [1, 2, 3])
+        self.assertIn("http://page/a", history)
+
+if __name__ == "__main__":
+    unittest.main()
 
 if __name__ == "__main__":
     unittest.main()

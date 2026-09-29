@@ -28,6 +28,8 @@ from yt_zero_touch.services.updater import (
 __all__ = [
     "DENO_PATH",
     "LogFn",
+    "_PLAYWRIGHT_OK",
+    "_launch_temp_browser",
     "ToolUpdateScheduler",
     "check_dependencies",
     "check_disk_space",

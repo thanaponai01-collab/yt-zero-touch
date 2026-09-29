@@ -13,10 +13,9 @@ Tuned for Premiere Pro compatibility:
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 from yt_zero_touch.core.format_policy import FORMAT_SORT
 from yt_zero_touch.core.models import (
@@ -31,12 +30,11 @@ from yt_zero_touch.core.transcode import (
     merge_session,
     plan_transcode,
 )
-from yt_zero_touch.engines.base import BaseEngine, LogFn
+from yt_zero_touch.engines.base import LogFn
 from yt_zero_touch.engines.gallery_engine import download_gallery, GALLERY_DL_OK
 from yt_zero_touch.engines.gdrive_engine import extract_gdrive_id, download_gdrive
 from yt_zero_touch.services.resolver import (
     resolve_url,
-    _launch_temp_browser,
     _PLAYWRIGHT_OK,
     _BROWSER_ARGS,
 )
@@ -55,27 +53,29 @@ except ImportError:
     sync_playwright = None  # type: ignore
 
 
-_SECTION_DOWNLOAD_TIMEOUT_S = 300
-
 # Default install path install.bat's bgutil-ytdlp-pot-provider step writes to
-# (see ADR-0004) — passed explicitly so the plugin's HTTP PO Token provider
+# (see ADR-0004) - passed explicitly so the plugin's HTTP PO Token provider
 # knows script mode is in use and logs its always-failing localhost:4416
 # ping as expected info rather than a warning.
 _POT_SCRIPT_PATH = str(
     Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "generate_once.js")
 
+_SECTION_DOWNLOAD_TIMEOUT_S = 300
+
+
 # A section trim always goes through yt-dlp's FFmpegFD external downloader
 # (the seek needs ffmpeg's -ss), which spawns ffmpeg and blocks on plain
-# `proc.wait()` — see yt_dlp/downloader/external.py ExternalFD.real_download /
+# `proc.wait()` - see yt_dlp/downloader/external.py ExternalFD.real_download /
 # FFmpegFD._call_downloader. It fires progress_hooks exactly once, *after*
 # ffmpeg has already exited, never while the process is running. So a
-# watchdog living in a progress hook can never see a stuck download, let
-# alone abort one. The only place that can actually see and kill the live
-# ffmpeg process is whatever spawns it, so we intercept that: patch the
-# `Popen` yt-dlp's external downloader uses to hand every spawned process to
-# a per-thread watchdog, which kills it if the deadline passes before the
-# download finishes on its own.
-_section_watchdogs: "dict[int, _FFmpegSectionWatchdog]" = {}
+# watchdog living in a progress hook (the previous approach here) can never
+# see a stuck download, let alone abort one - it is permanently dead code and
+# the section trim hangs forever despite it. The only place that can actually
+# see and kill the live ffmpeg process is whatever spawns it, so we intercept
+# that: patch the `Popen` yt-dlp's external downloader uses to hand every
+# spawned process to a per-thread watchdog, which kills it if the deadline
+# passes before the download finishes on its own.
+_section_watchdogs: dict[int, "_FFmpegSectionWatchdog"] = {}
 _section_watchdogs_lock = threading.Lock()
 _popen_patch_lock = threading.Lock()
 _popen_patched = False
@@ -84,7 +84,7 @@ _popen_patched = False
 def _ensure_ffmpeg_popen_patched() -> None:
     """Patch yt_dlp's external-downloader Popen once so every process it
     spawns is handed to whichever _FFmpegSectionWatchdog is active on the
-    spawning thread (if any). Idempotent and safe to call unconditionally —
+    spawning thread (if any). Idempotent and safe to call unconditionally -
     downloads with no active watchdog on their thread are a no-op lookup.
     """
     global _popen_patched
@@ -120,9 +120,9 @@ class _FFmpegSectionWatchdog:
     def __init__(self, timeout_s: float):
         self._timeout_s = timeout_s
         self._done = threading.Event()
-        self._procs: "list" = []
+        self._procs: list = []
         self._procs_lock = threading.Lock()
-        self._thread: "threading.Thread | None" = None
+        self._thread: threading.Thread | None = None
         self.timed_out = False
 
     def _capture(self, proc) -> None:
@@ -156,7 +156,7 @@ class _FFmpegSectionWatchdog:
             _section_watchdogs.pop(threading.get_ident(), None)
 
 
-def _log_section_timeout(sections: Any, log: Callable) -> None:
+def _log_section_timeout(log: LogFn) -> None:
     mins = _SECTION_DOWNLOAD_TIMEOUT_S // 60
     log(f"  Section download exceeded {mins} min and was aborted.", "error")
     log("  ffmpeg reads from the start of the video to reach the clip, so a "
@@ -240,7 +240,8 @@ def download_ytdlp(
     ok = _download_api(
         resolved, outtmpl, fmt, audio_only, playlist, write_metadata,
         sub_langs, ck_file, browser_cookie, force, log, progress_hook,
-        sections=parsed_sections, target_codec=target_codec, player_client=player_client,
+        sections=parsed_sections, player_client=player_client,
+        target_codec=target_codec,
     )
 
     if not ok and not audio_only and GALLERY_DL_OK and is_image_host(url):
@@ -263,8 +264,8 @@ def _download_api(
     log: LogFn = _print_log,
     extra_progress_hook: Callable[[dict], None] | None = None,
     sections: list[tuple[float, float]] | None = None,
-    target_codec: str = "h264",
     player_client: str | None = None,
+    target_codec: str = "h264",
 ) -> bool:
     class _Logger:
         def debug(self, msg):
@@ -311,10 +312,19 @@ def _download_api(
     container = container_for(audio_only, target_codec)  # type: ignore
     merge = merge_session(log, container)
 
-    def _tune_merge_args_for_premiere(status: dict):
+    def _on_postprocessor(status: dict):
+        info = status.get("info_dict") or {}
+        # MoveFiles is yt-dlp's last postprocessor (YoutubeDL.process_info),
+        # and its info_dict["filepath"] is where the media file actually
+        # landed - whether or not a merge ran. That is what makes the
+        # container commitment checkable on a single pre-muxed format, which
+        # the Merger callback below never sees.
+        if status.get("postprocessor") == "MoveFiles":
+            if status.get("status") == "finished":
+                merge.output_landed(info.get("filepath"))
+            return
         if status.get("postprocessor") != "Merger":
             return
-        info = status.get("info_dict") or {}
         if status.get("status") == "finished":
             merge.merge_finished(info.get("filepath"))
             return
@@ -350,7 +360,7 @@ def _download_api(
         "postprocessors":                postprocessors,
         **({
             "postprocessor_args": {"merger": PRE_MERGE_DEFAULT_ARGS},
-            "postprocessor_hooks": [_tune_merge_args_for_premiere],
+            "postprocessor_hooks": [_on_postprocessor],
         } if not audio_only else {}),
         "format_sort":                   FORMAT_SORT,
         "socket_timeout":                60,
@@ -359,9 +369,17 @@ def _download_api(
         "retries":                       50,
         "throttledratelimit":            102400,
         "fragment_retries":              10,
-        # player_client is an explicit override (see download_with_retry's
-        # login-wall / client-retry fallbacks in services/orchestrator.py),
-        # used only after the default client has already failed on this URL.
+        # ponytail: no player_client override by default - yt-dlp's built-in
+        # default (tv_simply/android_vr became erratic and now often serve
+        # only format 18/360p, see yt-dlp#16150) is actively retuned upstream
+        # as YouTube's PO-token requirements shift, so pinning one here would
+        # itself go stale. player_client is instead an explicit override
+        # (see download_with_retry's login-wall fallback in
+        # services/orchestrator.py), used only after the default has already
+        # failed a bot-check on this URL - the one case where a specific
+        # known-good client list (tv_simply,android_vr,tv,web - no PO token
+        # needed) is worth a shot.
+        # generic:impersonate retries with browser impersonation on Cloudflare 403s.
         "extractor_args":                {
             "generic": {"impersonate": [""]},
             **({"youtube": {"player_client": player_client.split(",")}}
@@ -392,20 +410,17 @@ def _download_api(
             from yt_dlp.utils import download_range_func
             ydl_opts["download_ranges"] = download_range_func(None, sections)
             ydl_opts["force_keyframes_at_cuts"] = True
-            # yt-dlp's socket_timeout doesn't reach the ffmpeg downloader; give
-            # ffmpeg its own read timeout so a genuinely stalled connection
-            # aborts (30s of zero bytes) instead of blocking forever. The
-            # _FFmpegSectionWatchdog below covers the slow-but-progressing
-            # deep-seek case that -rw_timeout can't see.
-            #
             # "ffmpeg" (not "ffmpeg_i"/"ffmpeg_o") lands in FFmpegFD's general
             # arg list, appended after its own "-loglevel quiet" (added because
-            # our top-level ydl_opts["quiet"]=True) — the later flag wins, so
+            # our top-level ydl_opts["quiet"]=True) - the later flag wins, so
             # this un-silences ffmpeg's stderr. Without it, a CDN rejection
-            # (e.g. HTTP 403 on a stale/erratic-client URL) is invisible:
-            # ffmpeg reports only a meaningless raw exit code, captured_errors
-            # never contains "403", and classify_failure/client-retry-fallback
-            # — built to catch exactly this — never fires.
+            # (e.g. HTTP 403 on a stale/erratic-client URL, see the
+            # player_client comment above) is invisible: ffmpeg reports only a
+            # meaningless raw exit code ("ffmpeg exited with code 3436169992"),
+            # captured_errors never contains "403", and core/failures.py's
+            # classify_failure/login-wall-fallback - built to catch exactly
+            # this - never fires, so download_with_retry blindly repeats the
+            # same doomed request instead of retrying with a different client.
             ydl_opts["external_downloader_args"] = {
                 "ffmpeg_i": ["-rw_timeout", "30000000"],
                 "ffmpeg": ["-loglevel", "warning"],
@@ -419,7 +434,7 @@ def _download_api(
     # watchdog can't do this. Non-section downloads skip it entirely.
     watchdog_cm = _FFmpegSectionWatchdog(_SECTION_DOWNLOAD_TIMEOUT_S) if sections \
         else contextlib.nullcontext()
-    watchdog: "_FFmpegSectionWatchdog | None" = None
+    watchdog: _FFmpegSectionWatchdog | None = None
 
     try:
         with watchdog_cm as watchdog:
@@ -427,37 +442,40 @@ def _download_api(
                 with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     ret = ydl.download([resolved])
             if watchdog is not None and watchdog.timed_out:
-                _log_section_timeout(sections, log)
+                _log_section_timeout(log)
                 return False
         if ret != 0:
             return False
         return merge.verify()
     except Exception as exc:
         if watchdog is not None and watchdog.timed_out:
-            _log_section_timeout(sections, log)
+            _log_section_timeout(log)
             return False
         log(f"  yt-dlp API error: {exc}", "error")
         return False
 
 
 class Downloader:
-    """Context manager that keeps one Chromium instance alive for all downloads."""
+    """Context manager that keeps one Chromium instance alive for all downloads
+    started on the thread that opened it."""
 
     def __init__(
         self,
         cookie_file: Path | str | None = None,
         log: LogFn = _print_log,
     ):
-        self.cookie_file = Path(cookie_file) if cookie_file else None
-        self.log         = log
-        self._lock       = threading.Lock()
-        self._pw         = None
-        self._browser    = None
+        self.cookie_file   = Path(cookie_file) if cookie_file else None
+        self.log           = log
+        self._lock         = threading.Lock()
+        self._pw           = None
+        self._browser      = None
+        self._owner_thread = None
 
     def __enter__(self):
         if _PLAYWRIGHT_OK and sync_playwright is not None:
-            self._pw      = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+            self._pw           = sync_playwright().start()
+            self._browser      = self._pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+            self._owner_thread = threading.get_ident()
         return self
 
     def __exit__(self, *_):
@@ -474,6 +492,7 @@ class Downloader:
                 except Exception:
                     pass
                 self._pw = None
+            self._owner_thread = None
 
     def download(
         self,
@@ -499,7 +518,16 @@ class Downloader:
     ) -> bool:
         ck = cookie_file or self.cookie_file
         with self._lock:
-            browser = self._browser
+            # Playwright's sync API is bound to the thread that started it: a
+            # worker thread touching this browser raises "cannot switch to a
+            # different thread", which killed every unknown-site resolve in
+            # the CLI watcher (it submits dl.download to a ThreadPoolExecutor).
+            # Off-thread callers get None, and resolve_urls launches its own
+            # short-lived browser instead - slower, but it actually resolves.
+            browser = (
+                self._browser
+                if self._owner_thread == threading.get_ident() else None
+            )
         return download_ytdlp(
             url,
             out_dir=out_dir,
@@ -521,11 +549,3 @@ class Downloader:
             player_client=player_client,
             _browser=browser,
         )
-
-
-class YtdlpEngine(BaseEngine):
-    def can_handle(self, url: str, **kwargs: Any) -> bool:
-        return True
-
-    def download(self, url: str, out_dir: Path, log: LogFn, **kwargs: Any) -> bool:
-        return download_ytdlp(url, out_dir=out_dir, log=log, **kwargs)

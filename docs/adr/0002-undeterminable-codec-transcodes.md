@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-13
-- **Context:** `transcode_plan.plan_transcode`
+- **Context:** `core.transcode.plan_transcode`
 
 ## Context
 

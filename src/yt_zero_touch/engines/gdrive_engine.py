@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from yt_zero_touch.engines.base import BaseEngine, LogFn
+from yt_zero_touch.engines.base import LogFn
 
 try:
     import gdown as _gdown
@@ -57,14 +56,3 @@ def download_gdrive(file_id: str, out_dir: Path, log: LogFn) -> bool:
     except Exception as exc:
         log(f"gdown error: {exc}", "error")
         return False
-
-
-class GDriveEngine(BaseEngine):
-    def can_handle(self, url: str, **kwargs: Any) -> bool:
-        return extract_gdrive_id(url) is not None
-
-    def download(self, url: str, out_dir: Path, log: LogFn, **kwargs: Any) -> bool:
-        file_id = extract_gdrive_id(url)
-        if not file_id:
-            return False
-        return download_gdrive(file_id, out_dir, log)
