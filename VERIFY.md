@@ -25,6 +25,10 @@ Run them all with `verify.py run`.
 - test: `python -m pytest tests/test_services.py -q`
 - fail-proof: [updater] version-change check forced true, pip-failure branch disabled, weekly scheduler always False; [system] disk check always True, check_ffmpeg always True, deno home path misspelled: each turned test_services red in src/yt_zero_touch/services/, reverted (git diff empty)
 
+## Engines
+- test: `python -m pytest tests/test_engines.py -q`
+- fail-proof: [gdrive] id regex, uc url, no-output branch, exception handler; [gallery] login hosts, instagram args, --no-skip, empty-success rule, login-sign list, plain-failure stop, browser auto-try, browser order: 12 breaks in src/yt_zero_touch/engines/, each turned test_engines red, reverted (git diff empty). Four first survived (weak assertions); tests were tightened and all 12 then went red
+
 ## Config
 - test: `python -m pytest tests/test_config.py -q`
 - fail-proof: default quality Best -> Worst in src/yt_zero_touch/core/config.py; test_config.py went red, reverted (git diff empty)
@@ -40,4 +44,4 @@ Run them all with `verify.py run`.
 ## Blind spots
 - No real-run check: nothing downloads a real URL (yt-dlp, gallery-dl, gdown, Playwright and ffmpeg are not exercised end to end). update_tools is tested with subprocess faked, never against real pip.
 - The GUI smoke drives 7 handlers on a hidden real window (run_batch stubbed for the start button); it does not check layout or a real download. The Tk window is created once per run, with retries for a spurious Windows 'tk.tcl' startup error (0 failures in 12 consecutive runs after the retry was added; it flaked about 1 in 3 before).
-- Engines: only the yt-dlp engine is exercised (through `tests/test_ytdlp_skill.py`, with yt-dlp faked); `gallery_engine.py` and `gdrive_engine.py` have no test beyond the import check. `ui/state.py` is not imported by anything.
+- Engines: only the yt-dlp engine is exercised (through `tests/test_ytdlp_skill.py`, with yt-dlp faked); `gallery_engine.py` and `gdrive_engine.py` are tested with subprocess and gdown faked; neither tool is ever run for real. `ui/state.py` is not imported by anything.

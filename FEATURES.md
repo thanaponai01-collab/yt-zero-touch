@@ -63,3 +63,17 @@ Start the GUI: `run.bat` or `python app.py`. Start the watcher: `python watcher.
 - trace: `main` @ src/yt_zero_touch/ui/cli/watcher.py > `watch` @ src/yt_zero_touch/ui/cli/watcher.py > `_harvest_completed` @ src/yt_zero_touch/ui/cli/watcher.py
 - verify: Watcher
 - status: proven @ e66b47f: `python watcher.py --help` prints usage (re-run after the flatten/wip merge); the watch loop itself was not run
+
+## Photo and carousel downloads
+- what: Quality "Photos" (or an image link yt-dlp finds nothing on) sends the URL to gallery-dl, borrowing a logged-in browser session for Instagram/Facebook/Threads.
+- trace: `download_ytdlp` @ src/yt_zero_touch/engines/ytdlp_engine.py > `download_gallery` @ src/yt_zero_touch/engines/gallery_engine.py > `_run_gallery_dl` @ src/yt_zero_touch/engines/gallery_engine.py
+- needs: gallery-dl installed; a browser logged in to the site for login-walled hosts
+- verify: Engines
+- status: traced: read the chain; adapters tested with subprocess faked, gallery-dl never run
+
+## Google Drive downloads
+- what: A Drive share link is downloaded by file id with gdown, bypassing the virus-scan prompt.
+- trace: `download_ytdlp` @ src/yt_zero_touch/engines/ytdlp_engine.py > `download_gdrive` @ src/yt_zero_touch/engines/gdrive_engine.py
+- needs: gdown installed
+- verify: Engines
+- status: traced: read the chain; adapters tested with gdown faked, never run for real
