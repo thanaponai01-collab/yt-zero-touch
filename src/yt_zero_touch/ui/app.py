@@ -43,6 +43,7 @@ CLIP_POLL_MS = 1000
 PRESET_OPTIONS = [
     ("Best", "Best"),
     ("4K", "4K / 2160p"),
+    ("1440p", "1440p QHD"),
     ("1080p", "1080p FHD"),
     ("720p", "720p HD"),
     ("Audio only", "Audio Only"),

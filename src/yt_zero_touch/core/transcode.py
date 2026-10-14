@@ -51,6 +51,16 @@ _H264_NVENC_ARGS = [
     "-rc", "vbr", "-cq", "19", "-b:v", "0", "-pix_fmt", "yuv420p",
 ]
 
+_H264_QSV_ARGS = [
+    "-c:v", "h264_qsv", "-preset", "veryslow", "-global_quality", "20",
+    "-pix_fmt", "nv12",
+]
+
+_H264_AMF_ARGS = [
+    "-c:v", "h264_amf", "-quality", "quality", "-rc", "cbr",
+    "-pix_fmt", "yuv420p",
+]
+
 _PRORES_PROXY_ARGS = [
     "-c:v", "prores_ks", "-profile:v", "0", "-vendor", "apl0",
     "-pix_fmt", "yuv422p10le",
@@ -61,7 +71,7 @@ _PRORES_PROXY_ARGS = [
 class Encoder:
     """One H.264 encoder, in the two vocabularies that have to agree about it."""
     args: list[str]
-    kind: Literal["nvenc", "libx264", "prores"]
+    kind: Literal["nvenc", "qsv", "amf", "libx264", "prores"]
 
     @property
     def name(self) -> str:
@@ -72,15 +82,19 @@ _h264_encoder_cache: Encoder | None = None
 _h264_encoder_cache_lock = threading.Lock()
 _nvenc_cache: bool | None = None
 _nvenc_cache_lock = threading.Lock()
+_qsv_cache: bool | None = None
+_qsv_cache_lock = threading.Lock()
+_amf_cache: bool | None = None
+_amf_cache_lock = threading.Lock()
 
 
-def _nvenc_available() -> bool:
-    """Probe ffmpeg for a working h264_nvenc. Prefer nvenc_available()."""
+def _probe_encoder(codec_name: str) -> bool:
+    """Probe ffmpeg for a working video encoder."""
     try:
         proc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2",
-             "-frames:v", "3", "-c:v", "h264_nvenc", "-f", "null", "-"],
+             "-frames:v", "3", "-c:v", codec_name, "-f", "null", "-"],
             capture_output=True, timeout=30,
         )
         return proc.returncode == 0
@@ -88,9 +102,12 @@ def _nvenc_available() -> bool:
         return False
 
 
+def _nvenc_available() -> bool:
+    return _probe_encoder("h264_nvenc")
+
+
 def nvenc_available() -> bool:
-    """True if this machine can encode with h264_nvenc. Spawns ffmpeg once
-    per process; every later caller gets the cached answer."""
+    """True if this machine can encode with h264_nvenc."""
     global _nvenc_cache
     with _nvenc_cache_lock:
         if _nvenc_cache is None:
@@ -98,14 +115,40 @@ def nvenc_available() -> bool:
         return _nvenc_cache
 
 
+def qsv_available() -> bool:
+    """True if this machine can encode with Intel QuickSync (h264_qsv)."""
+    global _qsv_cache
+    with _qsv_cache_lock:
+        if _qsv_cache is None:
+            _qsv_cache = _probe_encoder("h264_qsv")
+        return _qsv_cache
+
+
+def amf_available() -> bool:
+    """True if this machine can encode with AMD AMF (h264_amf)."""
+    global _amf_cache
+    with _amf_cache_lock:
+        if _amf_cache is None:
+            _amf_cache = _probe_encoder("h264_amf")
+        return _amf_cache
+
+
+def get_best_h264_encoder() -> Encoder:
+    """Probe hardware encoders in order (NVENC -> QSV -> AMF) and fall back to libx264."""
+    if nvenc_available():
+        return Encoder(_H264_NVENC_ARGS, "nvenc")
+    if qsv_available():
+        return Encoder(_H264_QSV_ARGS, "qsv")
+    if amf_available():
+        return Encoder(_H264_AMF_ARGS, "amf")
+    return Encoder(_H264_TRANSCODE_ARGS, "libx264")
+
+
 def _h264_encoder() -> Encoder:
     global _h264_encoder_cache
     with _h264_encoder_cache_lock:
         if _h264_encoder_cache is None:
-            _h264_encoder_cache = (
-                Encoder(_H264_NVENC_ARGS, "nvenc") if nvenc_available()
-                else Encoder(_H264_TRANSCODE_ARGS, "libx264")
-            )
+            _h264_encoder_cache = get_best_h264_encoder()
         return _h264_encoder_cache
 
 
@@ -115,16 +158,20 @@ _H264_VCODEC_PREFIXES = ("avc1", "h264")
 
 PRE_MERGE_DEFAULT_ARGS = [
     "-c:v", "copy",
-    "-c:a", "aac", "-b:a", "192k",
+    "-c:a", "aac", "-b:a", "256k",
     "-movflags", "+faststart",
 ]
 
 TargetCodec = Literal["h264", "prores"]
 
 
-def container_for(audio_only: bool, target_codec: TargetCodec = "h264") -> str:
+def container_for(
+    audio_only: bool,
+    target_codec: TargetCodec = "h264",
+    audio_format: str = "m4a",
+) -> str:
     if audio_only:
-        return "opus"
+        return audio_format
     if target_codec == "prores":
         return "mov"
     return "mp4" if TRANSCODE_TO_H264 else "mp4/mkv"
@@ -140,6 +187,7 @@ class TranscodePlan:
     codec_case: CodecCase
     log_message: str | None
     log_level: str = "info"
+    allow_concurrent_software_slots: bool = False
 
 
 def _codec_case(vcodec: str) -> CodecCase:
@@ -151,12 +199,16 @@ def _codec_case(vcodec: str) -> CodecCase:
 def _audio_merge_args(acodec: str) -> list[str]:
     return (
         [] if acodec.startswith(_AAC_ACODEC_PREFIXES)
-        else ["-c:a", "aac", "-b:a", "192k"]
+        else ["-c:a", "aac", "-b:a", "256k"]
     )
 
 
 def plan_transcode(
-    vcodec: str, acodec: str, target_codec: TargetCodec = "h264",
+    vcodec: str,
+    acodec: str,
+    target_codec: TargetCodec = "h264",
+    is_hdr: bool = False,
+    height: int | None = None,
 ) -> TranscodePlan:
     vcodec = vcodec.strip().lower()
     acodec = acodec.strip().lower()
@@ -210,9 +262,19 @@ def plan_transcode(
                 f"({encoder.name}) for Premiere compatibility (this takes longer)…"
             )
 
+    video_filter: list[str] = []
+    if is_hdr and will_transcode and target_codec != "prores":
+        video_filter = [
+            "-vf",
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p",
+        ]
+
     audio_args = _audio_merge_args(acodec)
-    merge_args = [*video_args, *audio_args, "-movflags", "+faststart"]
-    needs_gate = will_transcode and encoder.kind != "nvenc"
+    merge_args = [*video_args, *video_filter, *audio_args, "-movflags", "+faststart"]
+    needs_gate = will_transcode and (encoder is not None and encoder.kind not in ("nvenc", "qsv", "amf"))
+    allow_concurrent_software_slots = bool(
+        height is not None and height <= 1080 and target_codec != "prores"
+    )
 
     return TranscodePlan(
         merge_args=merge_args,
@@ -220,6 +282,7 @@ def plan_transcode(
         codec_case=codec_case,
         log_message=log_message,
         log_level=log_level,
+        allow_concurrent_software_slots=allow_concurrent_software_slots,
     )
 
 

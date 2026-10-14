@@ -26,4 +26,5 @@ memory.db
 .claude/
 .project-context/
 .verify-state.json
+RUN.json
 *.log

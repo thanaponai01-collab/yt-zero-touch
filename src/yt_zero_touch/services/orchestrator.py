@@ -27,6 +27,8 @@ from yt_zero_touch.core.models import (
 )
 from yt_zero_touch.services.resolver import (
     LogFn,
+    _F1_RE,
+    _KNOWN_DOMAINS,
     _PLAYWRIGHT_OK,
     _launch_temp_browser,
     _print_log,
@@ -243,8 +245,12 @@ def run_batch(
         lock = history_lock
         history_file = Path(history_path) if history_path else None
 
+    needs_browser = any(
+        not (any(d in u for d in _KNOWN_DOMAINS) or _F1_RE.search(u))
+        for u in urls
+    )
     worker_browser = (
-        browser_factory() if (playwright_ok and not policy.gallery) else None
+        browser_factory() if (playwright_ok and not policy.gallery and needs_browser) else None
     )
     work_items: list[tuple[int, str, str, str]] = []
     try:

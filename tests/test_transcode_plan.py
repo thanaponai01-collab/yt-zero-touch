@@ -24,8 +24,11 @@ class TestTranscodeToH264Default(unittest.TestCase):
 
 
 class TestContainerFor(unittest.TestCase):
-    def test_audio_only_is_opus(self):
-        self.assertEqual(transcode_plan.container_for(audio_only=True), "opus")
+    def test_audio_only_is_m4a_by_default(self):
+        self.assertEqual(transcode_plan.container_for(audio_only=True), "m4a")
+
+    def test_audio_only_supports_opus_explicitly(self):
+        self.assertEqual(transcode_plan.container_for(audio_only=True, audio_format="opus"), "opus")
 
     def test_forces_mp4_when_transcode_on(self):
         with mock.patch.object(transcode_plan, "TRANSCODE_TO_H264", True):
@@ -46,10 +49,10 @@ class TestContainerFor(unittest.TestCase):
                     "mov",
                 )
 
-    def test_prores_target_is_still_opus_for_audio_only(self):
+    def test_prores_target_is_m4a_for_audio_only(self):
         self.assertEqual(
             transcode_plan.container_for(audio_only=True, target_codec="prores"),
-            "opus",
+            "m4a",
         )
 
 
@@ -116,7 +119,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
     def test_merge_transcodes_audio_only_for_h264_plus_opus(self):
         plan = transcode_plan.plan_transcode("avc1.640028", "opus")
         self.assertEqual(plan.merge_args,
-                         ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                         ["-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
                           "-movflags", "+faststart"])
 
     def test_merge_copies_vp9_when_transcode_disabled(self):
@@ -140,7 +143,7 @@ class TestPlanTranscode(GateFreeAfterTest, unittest.TestCase):
             plan = transcode_plan.plan_transcode("av01.0.05M.08", "opus")
         self.assertEqual(
             plan.merge_args,
-            [*transcode_plan._H264_TRANSCODE_ARGS, "-c:a", "aac", "-b:a", "192k",
+            [*transcode_plan._H264_TRANSCODE_ARGS, "-c:a", "aac", "-b:a", "256k",
              "-movflags", "+faststart"],
         )
 
@@ -353,7 +356,9 @@ class TestH264EncoderSelection(unittest.TestCase):
             )
 
     def test_falls_back_to_libx264_slow(self):
-        with mock.patch.object(transcode_plan, "_nvenc_available", return_value=False):
+        with mock.patch.object(transcode_plan, "_nvenc_available", return_value=False), \
+             mock.patch.object(transcode_plan, "qsv_available", return_value=False), \
+             mock.patch.object(transcode_plan, "amf_available", return_value=False):
             self.assertEqual(
                 transcode_plan._h264_encoder(),
                 transcode_plan.Encoder(transcode_plan._H264_TRANSCODE_ARGS, "libx264"),
