@@ -24,3 +24,6 @@ cookies.txt
 # Claude Code local data
 memory.db
 .claude/
+.project-context/
+.verify-state.json
+*.log
