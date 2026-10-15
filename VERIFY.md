@@ -41,6 +41,10 @@ Run them all with `verify.py run`.
 - test: `python -m pytest tests/test_watcher.py -q`
 - fail-proof: _harvest_completed stopped recording history in src/yt_zero_touch/ui/cli/watcher.py; test_watcher.py went red, reverted (git diff empty)
 
+## Cookies and login vault
+- test: `python -m pytest tests/test_cookies.py tests/test_cookie_vault.py tests/test_improvements.py -q`
+- fail-proof: not yet mutation-checked (arrived with the flatten/wip merge)
+
 ## Blind spots
 - No real-run check: nothing downloads a real URL (yt-dlp, gallery-dl, gdown, Playwright and ffmpeg are not exercised end to end). update_tools is tested with subprocess faked, never against real pip.
 - The GUI smoke drives 7 handlers on a hidden real window (run_batch stubbed for the start button); it does not check layout or a real download. The Tk window is created once per run, with retries for a spurious Windows 'tk.tcl' startup error (0 failures in 12 consecutive runs after the retry was added; it flaked about 1 in 3 before).

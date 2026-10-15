@@ -16,10 +16,12 @@ import subprocess
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable
 
+from yt_zero_touch.core.cookies import CookieStatus, inspect_cookie_file
 from yt_zero_touch.core.config import AppSettings
+from yt_zero_touch.services.cookie_vault import VAULT_TARGETS, launch_login_vault
 from yt_zero_touch.core.history import HistoryStore
 from yt_zero_touch.core.models import QUALITY_PRESETS, URL_RE, BatchPolicy
 from yt_zero_touch.core.transcode import nvenc_available
@@ -41,6 +43,7 @@ CLIP_POLL_MS = 1000
 PRESET_OPTIONS = [
     ("Best", "Best"),
     ("4K", "4K / 2160p"),
+    ("1440p", "1440p QHD"),
     ("1080p", "1080p FHD"),
     ("720p", "720p HD"),
     ("Audio only", "Audio Only"),
@@ -87,9 +90,12 @@ class App(tk.Tk):
         self._queue_rows: dict[int, str] = {}
         self._preset_buttons: dict[str, tk.Button] = {}
         self._toggle_buttons: list[tuple[tk.Button, tk.BooleanVar, str, str, str, str]] = []
+        self._last_failed_urls: list[str] = []
+        self._current_cookie_status: CookieStatus | None = None
 
         self._load_settings()
         self._build_ui()
+        self._update_cookie_status()
 
         try:
             self._clip_last = self.clipboard_get()
@@ -425,7 +431,23 @@ class App(tk.Tk):
             activebackground=COLORS["input_bg"], activeforeground=COLORS["text"],
             relief="flat", font=("Segoe UI", 8), cursor="hand2", padx=6, pady=1,
             highlightthickness=1, highlightbackground=COLORS["border"],
-        ).pack(side="left", padx=(4, 12))
+        ).pack(side="left", padx=(4, 6))
+
+        tk.Button(
+            trim_cookie_row, text="🔐 Login Vault…", command=self._open_login_vault,
+            bg=COLORS["input_bg"], fg=COLORS["accent"],
+            activebackground=COLORS["accent"], activeforeground="white",
+            relief="flat", font=("Segoe UI", 8, "bold"), cursor="hand2", padx=6, pady=1,
+            highlightthickness=1, highlightbackground=COLORS["border"],
+        ).pack(side="left", padx=(0, 6))
+
+        self.cookie_status_btn = tk.Button(
+            trim_cookie_row, text="○ No cookies", command=self._show_cookie_details,
+            bg=COLORS["card"], fg=COLORS["muted"],
+            activebackground=COLORS["card"], activeforeground=COLORS["text"],
+            relief="flat", font=("Segoe UI", 8), cursor="hand2", bd=0, padx=2,
+        )
+        self.cookie_status_btn.pack(side="left", padx=(0, 10))
 
         # Folder location
         tk.Label(trim_cookie_row, text="Folder:", bg=COLORS["card"], fg=COLORS["muted"], font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
@@ -495,6 +517,15 @@ class App(tk.Tk):
         ).pack(side="left")
 
         tk.Label(qhdr, text="Max Threads: 3", bg=COLORS["card"], fg=COLORS["muted"], font=("Consolas", 7)).pack(side="left", padx=10)
+
+        self.retry_failed_btn = tk.Button(
+            qhdr, text="🔁 Retry Failed (0)", command=self._retry_failed,
+            bg=COLORS["card_alt"], fg=COLORS["muted"],
+            activebackground=COLORS["card_alt"], activeforeground=COLORS["accent"],
+            relief="flat", cursor="hand2", bd=0, font=("Segoe UI", 8, "bold"),
+            state="disabled", padx=8,
+        )
+        self.retry_failed_btn.pack(side="right", padx=(6, 0))
 
         tk.Button(
             qhdr, text="Clear finished", command=self._clear_finished_rows,
@@ -636,7 +667,11 @@ class App(tk.Tk):
         if b_cookie != "none":
             parts.append(f"Cookies: {b_cookie.capitalize()}")
         elif self.cookie_file.get().strip():
-            parts.append(f"Cookies: {Path(self.cookie_file.get().strip()).name}")
+            status = getattr(self, "_current_cookie_status", None)
+            stat_hint = f" [{status.summary}]" if status and status.valid else ""
+            parts.append(f"Cookies: {Path(self.cookie_file.get().strip()).name}{stat_hint}")
+        else:
+            parts.append("Cookies: None")
 
         self.summary_lbl.config(text="✨ Profile:  " + "   •   ".join(parts))
 
@@ -747,8 +782,129 @@ class App(tk.Tk):
         if f:
             self.cookie_file.set(f)
             self._save_settings()
+            self._update_cookie_status()
             self._update_profile_summary()
             self._log(f"Loaded cookies file: {Path(f).name}", "info")
+
+    def _update_cookie_status(self):
+        ck_path = self.cookie_file.get().strip()
+        status = inspect_cookie_file(ck_path if ck_path else None)
+        self._current_cookie_status = status
+
+        if status.status == "active":
+            lbl_text = f"● {status.summary}"
+            fg_col = COLORS["success"]
+        elif status.status == "expiring_soon":
+            lbl_text = f"⚠ {status.summary}"
+            fg_col = COLORS["amber"]
+        elif status.status == "expired":
+            lbl_text = f"✖ {status.summary}"
+            fg_col = COLORS["error"]
+        elif status.status == "missing":
+            lbl_text = f"⚠ {status.summary}"
+            fg_col = COLORS["error"]
+        else:
+            lbl_text = "○ No cookies"
+            fg_col = COLORS["muted"]
+
+        if hasattr(self, "cookie_status_btn"):
+            self.cookie_status_btn.config(text=lbl_text, fg=fg_col)
+
+    def _show_cookie_details(self):
+        status = getattr(self, "_current_cookie_status", None)
+        if not status or status.status == "none":
+            messagebox.showinfo(
+                "Cookie Status",
+                "No cookie file currently loaded.\n\nUse 'Cookie file…' to select a cookies.txt, "
+                "or click '🔐 Login Vault…' to authenticate directly without browser extensions.",
+            )
+            return
+        details_txt = "\n".join(status.details)
+        messagebox.showinfo("Cookie Health & Expiration", f"Status: {status.summary}\n\n{details_txt}")
+
+    def _open_login_vault(self):
+        vault_win = tk.Toplevel(self)
+        vault_win.title("🔐 Login Vault")
+        vault_win.geometry("380x300")
+        vault_win.configure(bg=COLORS["card"])
+        vault_win.resizable(False, False)
+        vault_win.transient(self)
+        vault_win.grab_set()
+
+        tk.Label(
+            vault_win, text="🔐 Browser Login Vault",
+            bg=COLORS["card"], fg=COLORS["text_bright"],
+            font=("Segoe UI", 12, "bold"),
+        ).pack(pady=(16, 4))
+
+        tk.Label(
+            vault_win,
+            text="Opens a clean browser window to log in.\nCookies are automatically captured when you close the window.",
+            bg=COLORS["card"], fg=COLORS["muted"],
+            font=("Segoe UI", 8), justify="center",
+        ).pack(pady=(0, 14))
+
+        btn_frame = tk.Frame(vault_win, bg=COLORS["card"])
+        btn_frame.pack(fill="x", padx=24)
+
+        for key, target in VAULT_TARGETS.items():
+            btn = tk.Button(
+                btn_frame,
+                text=f"Log in to {target['label']}",
+                command=lambda k=key: self._start_vault_login(k, vault_win),
+                bg=COLORS["input_bg"], fg=COLORS["text"],
+                activebackground=COLORS["accent"], activeforeground="white",
+                relief="flat", font=("Segoe UI", 9, "bold"),
+                cursor="hand2", pady=6,
+                highlightthickness=1, highlightbackground=COLORS["border"],
+            )
+            btn.pack(fill="x", pady=3)
+
+    def _start_vault_login(self, target_key: str, win: tk.Toplevel):
+        win.destroy()
+        vault_file = self.base_dir / "Cookies" / "vault_cookies.txt"
+        self._log(f"Launching Login Vault for {target_key} in a clean browser window…", "accent")
+
+        def _on_done(ok: bool, msg: str):
+            def _apply():
+                if ok:
+                    self.cookie_file.set(str(vault_file))
+                    self.browser_cookies.set("none")
+                    self._save_settings()
+                    self._update_cookie_status()
+                    self._update_profile_summary()
+                    self._log(f"Vault cookies activated: {vault_file.name}", "success")
+                else:
+                    self._log(msg, "warn")
+            self.after(0, _apply)
+
+        threading.Thread(
+            target=launch_login_vault,
+            args=(target_key, vault_file),
+            kwargs={"log": self._log, "on_done": _on_done},
+            daemon=True,
+        ).start()
+
+    def _retry_failed(self):
+        failed_urls = list(self._last_failed_urls)
+        for iid in self.queue.get_children():
+            tags = self.queue.item(iid, "tags") or ()
+            if "failed" in tags:
+                vals = self.queue.item(iid, "values")
+                if len(vals) >= 2 and vals[1] not in failed_urls:
+                    failed_urls.append(vals[1])
+
+        if not failed_urls:
+            self._log("No failed URLs to retry.", "info")
+            return
+
+        self._log(f"Retrying {len(failed_urls)} failed download(s) with Force Re-download…", "accent")
+        self.url_box.delete("1.0", "end")
+        self.url_box.insert("end", "\n".join(failed_urls))
+        self.force_redl.set(True)
+        self._update_link_count()
+        self._update_profile_summary()
+        self._start_download()
 
     def _open_folder(self):
         p = Path(self.out_dir.get())
@@ -771,6 +927,14 @@ class App(tk.Tk):
         for iid in self.queue.get_children():
             self.queue.delete(iid)
         self._queue_rows.clear()
+        self._last_failed_urls.clear()
+        if hasattr(self, "retry_failed_btn"):
+            self.retry_failed_btn.config(
+                state="disabled",
+                text="🔁 Retry Failed (0)",
+                bg=COLORS["card_alt"],
+                fg=COLORS["muted"],
+            )
         for idx, url in enumerate(urls, 1):
             iid = self.queue.insert("", "end", values=(str(idx), url, "Queued", "-"), tags=("queued",))
             self._queue_rows[idx] = iid
@@ -791,6 +955,32 @@ class App(tk.Tk):
             lbl, _ = STATUS_STYLE.get(status, (status.capitalize(), COLORS["text"]))
             pct_str = f"{pct:.1f}%" if pct is not None else "-"
             self.queue.item(iid, values=(str(idx), url, lbl, pct_str), tags=(status,))
+
+            if status == "failed":
+                if url not in self._last_failed_urls:
+                    self._last_failed_urls.append(url)
+            elif status == "done":
+                if url in self._last_failed_urls:
+                    self._last_failed_urls.remove(url)
+
+            failed_cnt = len(self._last_failed_urls)
+            if hasattr(self, "retry_failed_btn"):
+                if failed_cnt > 0:
+                    self.retry_failed_btn.config(
+                        state="normal",
+                        text=f"🔁 Retry Failed ({failed_cnt})",
+                        bg=COLORS["amber"],
+                        fg="black",
+                        activebackground=COLORS["amber"],
+                        activeforeground="black",
+                    )
+                else:
+                    self.retry_failed_btn.config(
+                        state="disabled",
+                        text="🔁 Retry Failed (0)",
+                        bg=COLORS["card_alt"],
+                        fg=COLORS["muted"],
+                    )
         self.after(0, _apply)
 
     def _update_ytdlp(self, quiet: bool = False):

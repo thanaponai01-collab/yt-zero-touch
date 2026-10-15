@@ -63,6 +63,16 @@ _POT_SCRIPT_PATH = str(
 _SECTION_DOWNLOAD_TIMEOUT_S = 300
 
 
+def get_default_extractor_args(player_client: str | None = None) -> dict:
+    """Default extractor args: Chrome impersonation, YouTube player clients, and PO Token script."""
+    return {
+        "generic": {"impersonate": ["chrome"]},
+        **({"youtube": {"player_client": player_client.split(",")}}
+           if player_client else {}),
+        "youtubepot-bgutilscript": {"script_path": [_POT_SCRIPT_PATH]},
+    }
+
+
 # A section trim always goes through yt-dlp's FFmpegFD external downloader
 # (the seek needs ffmpeg's -ss), which spawns ffmpeg and blocks on plain
 # `proc.wait()` - see yt_dlp/downloader/external.py ExternalFD.real_download /
@@ -295,6 +305,9 @@ def _download_api(
         elif d["status"] == "finished":
             log(f"  Finished: {Path(d.get('filename', '')).name}", "success")
 
+    container = container_for(audio_only, target_codec)  # type: ignore
+    merge = merge_session(log, container)
+
     postprocessors = [
         {"key": "FFmpegMetadata", "add_metadata": True, "add_chapters": True},
         {"key": "EmbedThumbnail", "already_have_thumbnail": False},
@@ -306,11 +319,8 @@ def _download_api(
     if audio_only:
         postprocessors.insert(
             0,
-            {"key": "FFmpegExtractAudio", "preferredcodec": "best", "preferredquality": "0"},
+            {"key": "FFmpegExtractAudio", "preferredcodec": container, "preferredquality": "0"},
         )
-
-    container = container_for(audio_only, target_codec)  # type: ignore
-    merge = merge_session(log, container)
 
     def _on_postprocessor(status: dict):
         info = status.get("info_dict") or {}
@@ -379,17 +389,7 @@ def _download_api(
         # failed a bot-check on this URL - the one case where a specific
         # known-good client list (tv_simply,android_vr,tv,web - no PO token
         # needed) is worth a shot.
-        # generic:impersonate retries with browser impersonation on Cloudflare 403s.
-        "extractor_args":                {
-            "generic": {"impersonate": [""]},
-            **({"youtube": {"player_client": player_client.split(",")}}
-               if player_client else {}),
-            # Tells the bgutil PO Token HTTP provider that script mode
-            # (ADR-0004) is in use, so its always-failing ping to the
-            # unused localhost:4416 server logs as an expected info line
-            # instead of a warning that looks like a real failure.
-            "youtubepot-bgutilscript": {"script_path": [_POT_SCRIPT_PATH]},
-        },
+        "extractor_args":                get_default_extractor_args(player_client),
         "remote_components":             ["ejs:github"],
         **({"js_runtimes": {"deno": {"path": DENO_PATH}}} if DENO_PATH else {}),
     }

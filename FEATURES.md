@@ -77,3 +77,9 @@ Start the GUI: `run.bat` or `python app.py`. Start the watcher: `python watcher.
 - needs: gdown installed
 - verify: Engines
 - status: traced: read the chain; adapters tested with gdown faked, never run for real
+
+## Cookie validation, login vault and retry queue
+- what: Cookie expiry validation, a stored login vault, and a retry-failed queue; arrived with the flatten/wip merge.
+- trace: `src/yt_zero_touch/core/cookies.py`, `src/yt_zero_touch/services/cookie_vault.py`, `src/yt_zero_touch/ui/app.py`
+- verify: Cookies and login vault
+- status: tests pass (215 total); GUI entry points not traced or launched
