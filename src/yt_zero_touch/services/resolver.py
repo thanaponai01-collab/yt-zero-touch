@@ -41,7 +41,7 @@ _BROWSER_ARGS = [
     "--no-first-run", "--mute-audio",
 ]
 
-_F1_RE      = re.compile(r"formula1\.com/en/video/.*?\.(\d{10,})")
+_F1_RE      = re.compile(r"formula1\.com/en/(?:latest/)?video[/.].*?\.(\d{10,})")
 _BC_ACCT_RE = re.compile(r"BRIGHTCOVE[_\s]*ACCOUNTID[\"\\s:]+(\d+)", re.IGNORECASE)
 # The id shows up in two shapes on the same page, and both must match:
 #   <div ... data-videoid="1709982240646065581">   (lowercase HTML attribute)

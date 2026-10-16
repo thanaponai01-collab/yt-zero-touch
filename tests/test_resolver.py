@@ -89,3 +89,93 @@ def test_all_from_html_dedupes_repeated_ids():
 
 def test_all_from_html_empty_without_account():
     assert _brightcove_all_from_html(ATTR_EMBED) == []
+
+
+def test_resolve_urls_f1():
+    from yt_zero_touch.services.resolver import resolve_urls
+    # 1. /en/latest/video.<title>.<id>.html format
+    f1_latest = "https://www.formula1.com/en/latest/video.highlights-2024-monaco.1709982240646065581.html"
+    res1 = resolve_urls(f1_latest)
+    assert len(res1) == 1
+    assert "players.brightcove.net/6057949432001" in res1[0]
+    assert "1709982240646065581" in res1[0]
+
+    # 2. /en/video/<title>.<id>.html format
+    f1_video = "https://www.formula1.com/en/video/highlights-2024-monaco.1709982240646065581.html"
+    res2 = resolve_urls(f1_video)
+    assert len(res2) == 1
+    assert "players.brightcove.net/6057949432001" in res2[0]
+    assert "1709982240646065581" in res2[0]
+
+
+
+def test_resolve_urls_known_domains_pass_through():
+    from yt_zero_touch.services.resolver import resolve_urls, resolve_url
+    yt_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    assert resolve_urls(yt_url) == [yt_url]
+    assert resolve_url(yt_url) == yt_url
+
+    reddit_url = "https://reddit.com/r/videos/comments/12345"
+    assert resolve_urls(reddit_url) == [reddit_url]
+
+
+def test_parse_netscape_cookies(tmp_path):
+    from yt_zero_touch.services.resolver import _parse_netscape_cookies
+    cookie_file = tmp_path / "cookies.txt"
+    content = (
+        "# Netscape HTTP Cookie File\n"
+        "# Comment line to skip\n"
+        "\n"  # empty line to skip
+        "too\tfew\tparts\n"  # malformed line to skip (< 7 parts)
+        ".example.com\tTRUE\t/\tTRUE\t1735689600\tsession_id\tabc123\n"
+        "sub.example.com\tFALSE\t/path\tFALSE\t1735689600\tpref\tdark\n"
+    )
+    cookie_file.write_text(content, encoding="utf-8")
+
+    cookies = _parse_netscape_cookies(cookie_file)
+    assert len(cookies) == 2
+
+    # First cookie: .example.com domain stripped leading dot, secure=True
+    assert cookies[0] == {
+        "name": "session_id",
+        "value": "abc123",
+        "domain": "example.com",
+        "path": "/",
+        "secure": True,
+        "sameSite": "None",
+    }
+
+    # Second cookie: secure=False
+    assert cookies[1] == {
+        "name": "pref",
+        "value": "dark",
+        "domain": "sub.example.com",
+        "path": "/path",
+        "secure": False,
+        "sameSite": "None",
+    }
+
+
+def test_stream_regex_and_ignore_stream_rules():
+    from yt_zero_touch.services.resolver import _STREAM_RE, _IGNORE_STREAM
+
+    # Matching stream extensions
+    assert _STREAM_RE.search("https://cdn.site.com/video/master.m3u8?token=xyz")
+    assert _STREAM_RE.search("https://cdn.site.com/video/track.mpd")
+    assert _STREAM_RE.search("https://cdn.site.com/video/1080p.mp4")
+
+    # Non-streams
+    assert _STREAM_RE.search("https://site.com/watch?v=123") is None
+    assert _STREAM_RE.search("https://site.com/image.jpg") is None
+
+    # Ignore streams list filtering
+    ignored_urls = [
+        "https://googleads.doubleclick.net/pagead/ads",
+        "https://rr1---sn-4g5ednls.googlevideo.com/videoplayback",
+        "https://cdn.site.com/preview_clip.m3u8",
+        "https://cdn.site.com/thumbnail.mp4",
+        "https://cdn.site.com/poster.jpg",
+    ]
+    for u in ignored_urls:
+        assert any(x in u.lower() for x in _IGNORE_STREAM)
+

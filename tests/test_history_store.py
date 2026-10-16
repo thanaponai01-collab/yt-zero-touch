@@ -53,6 +53,34 @@ class TestHistoryStore(unittest.TestCase):
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(raw, ["https://a.com", "https://b.com"])
 
+    def test_corrupt_or_non_list_json_handling(self):
+        # Corrupt JSON resets to empty set
+        self.path.write_text("{bad json", encoding="utf-8")
+        store = HistoryStore(self.path)
+        self.assertEqual(len(store), 0)
+
+        # Non-list JSON (e.g. dict) resets to empty set
+        self.path.write_text(json.dumps({"url": "https://a.com"}), encoding="utf-8")
+        store2 = HistoryStore(self.path)
+        self.assertEqual(len(store2), 0)
+
+    def test_iteration_and_save(self):
+        store = HistoryStore(self.path)
+        store.add("https://a.com")
+        store.add("https://b.com")
+        self.assertEqual(sorted(list(store)), ["https://a.com", "https://b.com"])
+
+        # Manual save
+        store.save()
+        self.assertTrue(self.path.exists())
+
+    def test_legacy_helpers(self):
+        from yt_zero_touch.core.history import load_history, save_history
+        save_history(self.path, {"https://x.com", "https://y.com"})
+        loaded = load_history(self.path)
+        self.assertEqual(loaded, {"https://x.com", "https://y.com"})
+
 
 if __name__ == "__main__":
     unittest.main()
+

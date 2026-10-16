@@ -200,5 +200,32 @@ class _StopAfterFirstPoll:
         raise KeyboardInterrupt
 
 
+class TestReadUrlsFromFile(unittest.TestCase):
+    def test_nonexistent_file_returns_empty_list(self):
+        self.assertEqual(watcher.read_urls_from_file(Path("nonexistent_urls_file.txt")), [])
+
+    def test_reads_urls_skips_comments_and_empty_lines(self):
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+            f.write(
+                "# Comment header\n"
+                "\n"
+                "   # Indented comment\n"
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ\n"
+                "\n"
+                "Check out https://twitter.com/user/status/12345 in line\n"
+                "not a url here\n"
+            )
+            f_path = Path(f.name)
+        try:
+            urls = watcher.read_urls_from_file(f_path)
+            self.assertEqual(urls, [
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "https://twitter.com/user/status/12345",
+            ])
+        finally:
+            f_path.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()
+

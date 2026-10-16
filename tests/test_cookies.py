@@ -130,6 +130,65 @@ class TestCookieParsing(unittest.TestCase):
             self.assertTrue(records[0].http_only)
             self.assertTrue(records[1].is_session)
 
+    def test_cookie_record_methods_and_immutability(self):
+        from dataclasses import FrozenInstanceError
+        # Session cookie
+        rec_session = CookieRecord(
+            domain=".example.com", include_subdomains=True, path="/",
+            secure=True, expires=0, name="sess", value="val"
+        )
+        self.assertTrue(rec_session.is_session)
+        self.assertFalse(rec_session.is_expired(now=1700000000.0))
+        self.assertFalse(rec_session.http_only)
+
+        # Boundary: expires exactly at current time is not yet expired
+        rec_boundary = CookieRecord(
+            domain=".example.com", include_subdomains=True, path="/",
+            secure=True, expires=1700000000, name="b", value="v"
+        )
+        self.assertFalse(rec_boundary.is_expired(now=1700000000.0))
+        self.assertTrue(rec_boundary.is_expired(now=1700000001.0))
+
+        # Frozen immutability
+        with self.assertRaises(FrozenInstanceError):
+            rec_session.name = "mutated"  # type: ignore
+
+    def test_inspect_expiring_soon_and_multi_domain_summary(self):
+        now = 1700000000.0
+        twelve_hours = int(now + 43200)
+
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+            f.write(
+                f".youtube.com\tTRUE\t/\tTRUE\t{twelve_hours}\t__Secure-3PSID\tyt_token\n"
+                f".instagram.com\tTRUE\t/\tTRUE\t{twelve_hours}\tsessionid\tig_token\n"
+                f".reddit.com\tTRUE\t/\tTRUE\t{twelve_hours}\ttoken\trd_token\n"
+            )
+            f_path = Path(f.name)
+        try:
+            st = inspect_cookie_file(f_path, now=now)
+            self.assertTrue(st.valid)
+            self.assertEqual(st.status, "expiring_soon")
+            self.assertIn("12h left", st.summary)
+            # More than 2 domains adds "+1"
+            self.assertIn("+1", st.summary)
+        finally:
+            f_path.unlink()
+
+    def test_export_playwright_cookies_subdomain_rules(self):
+        cookies = [
+            # sub.example.com has 2 dots -> TRUE
+            {"name": "a", "value": "1", "domain": "sub.example.com", "path": "/", "expires": 0},
+            # example.com has 1 dot -> FALSE
+            {"name": "b", "value": "2", "domain": "example.com", "path": "/", "expires": -5},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = Path(tmpdir) / "test_sub.txt"
+            export_playwright_cookies(cookies, out_file)
+            content = out_file.read_text(encoding="utf-8")
+            self.assertIn("sub.example.com\tTRUE\t/\tFALSE\t0\ta\t1", content)
+            self.assertIn("example.com\tFALSE\t/\tFALSE\t0\tb\t2", content)
+
 
 if __name__ == "__main__":
     unittest.main()
+

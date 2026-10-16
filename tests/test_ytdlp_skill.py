@@ -496,6 +496,14 @@ class TestParseSections(unittest.TestCase):
             [(30.0, 60.0), (120.0, 150.0)],
         )
 
+    def test_multiple_with_stars(self):
+        from yt_zero_touch.core.models import parse_sections
+        self.assertEqual(
+            parse_sections("*0:30-1:00, *2:00-2:30"),
+            [(30.0, 60.0), (120.0, 150.0)],
+        )
+
+
     def test_invalid_returns_none(self):
         from yt_zero_touch.core.models import parse_sections
         for bad in ("", None, "bad", "20:00-10:00", "5-5", "nope-nope"):
