@@ -29,6 +29,21 @@ class TestAppSettings(unittest.TestCase):
         self.assertEqual(settings.quality, "Best")
         self.assertEqual(settings.out_dir, "D:\\Downloads")
         self.assertFalse(settings.prores_proxy)
+        self.assertFalse(settings.sub_en)
+        self.assertFalse(settings.sub_th)
+        self.assertFalse(settings.watch_clip)
+
+    def test_ignores_unknown_keys_and_preserves_on_none(self):
+        data = {
+            "unknown_setting": "value",
+            "quality": None,
+            "sub_en": True,
+        }
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        loaded = AppSettings.load(self.path)
+        self.assertFalse(hasattr(loaded, "unknown_setting"))
+        self.assertEqual(loaded.quality, "Best")
+        self.assertTrue(loaded.sub_en)
 
     def test_save_and_reload(self):
         settings = AppSettings(

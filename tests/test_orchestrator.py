@@ -101,6 +101,27 @@ class TestClassifyFailure(unittest.TestCase):
     def test_no_formats_suggests_update(self):
         fc = classify_failure(["ERROR: No video formats found"])
         self.assertEqual(fc.reason, "needs_update")
+        self.assertTrue(fc.permanent)
+        self.assertTrue(is_permanent_error(["ERROR: No video formats found"]))
+
+    def test_ffmpeg_exit_code_boundary(self):
+        # Normal ffmpeg failure (0-255) is unclassified (transient).
+        # Abnormal termination (> 255) maps to client_served_bad_url.
+        self.assertIsNone(classify_failure(["ffmpeg exited with code 255"]))
+        fc_256 = classify_failure(["ffmpeg exited with code 256"])
+        self.assertIsNotNone(fc_256)
+        self.assertEqual(fc_256.reason, "client_served_bad_url")
+        self.assertFalse(fc_256.permanent)
+        fc_nt = classify_failure(["ffmpeg exited with code 3221225477"])
+        self.assertIsNotNone(fc_nt)
+        self.assertEqual(fc_nt.reason, "client_served_bad_url")
+
+
+    def test_failure_class_is_frozen(self):
+        from dataclasses import FrozenInstanceError
+        fc = classify_failure(["ERROR: server returned 403"])
+        with self.assertRaises(FrozenInstanceError):
+            fc.reason = "mutated"  # type: ignore
 
     def test_removed_video(self):
         fc = classify_failure(["ERROR: Video unavailable. This video has been removed"])
@@ -361,6 +382,64 @@ class TestRunBatch(unittest.TestCase):
         self.assertIn((1, "done"), terminal)
         self.assertIn((2, "failed"), terminal)
 
+    def test_unhandled_downloader_exception_marked_failed_in_batch(self):
+        class _CrashingDownloader:
+            def download(self, resolved, **kwargs):
+                raise RuntimeError("unexpected worker crash")
+
+        history = set()
+        result = self._run(["http://a/crash"], history, _CrashingDownloader())
+        self.assertEqual(result.total, 1)
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.failed, 1)
+        self.assertNotIn("http://a/crash", history)
+
+    def test_progress_hook_invocations(self):
+        status_updates = []
+        item_updates = []
+
+        def dl(log, hook):
+            # Report progress via hook
+            hook({
+                "status": "downloading",
+                "_percent_str": " 50.0%",
+                "_speed_str": "5MB/s",
+                "_eta_str": "00:10",
+                "downloaded_bytes": 500,
+                "total_bytes": 1000,
+            })
+            hook({"status": "finished"})
+            return True
+
+        outcome = download_with_retry(
+            dl,
+            url="http://x",
+            set_status=lambda s: status_updates.append(s),
+            set_item=lambda st, pct: item_updates.append((st, pct)),
+        )
+        self.assertTrue(outcome.ok)
+        self.assertTrue(any("Downloading" in s and "50.0%" in s for s in status_updates))
+        self.assertIn("Merging…", status_updates)
+        self.assertTrue(any(st == "downloading" and pct == 50.0 for st, pct in item_updates))
+
+    def test_client_retry_immediate_success_outcome(self):
+        def default_dl(log, hook):
+            log("Error opening input: Server returned 403 Forbidden", "error")
+            return False
+
+        def fallback_dl(log, hook):
+            return True  # succeeds immediately on fallback client
+
+        outcome = download_with_retry(
+            default_dl,
+            retry_max=3,
+            url="http://x",
+            sleep=lambda *_: None,
+            client_retry_fallback_fn=fallback_dl,
+        )
+        self.assertTrue(outcome.ok)
+        self.assertIsNone(outcome.failure)
+
 
     def test_a_page_with_several_videos_fans_out_into_one_download_each(self):
         events = []
@@ -384,3 +463,4 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     unittest.main()
+

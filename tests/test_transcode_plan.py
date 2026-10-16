@@ -503,5 +503,87 @@ class TestVerifyProresOutput(unittest.TestCase):
             )
 
 
+class TestProbeEncoder(unittest.TestCase):
+    def test_probe_encoder_success(self):
+        completed = mock.Mock(returncode=0)
+        with mock.patch.object(transcode_plan.subprocess, "run", return_value=completed) as m_run:
+            self.assertTrue(transcode_plan._probe_encoder("h264_nvenc"))
+            self.assertEqual(m_run.call_args.kwargs["capture_output"], True)
+            self.assertEqual(m_run.call_args.kwargs["timeout"], 30)
+
+    def test_probe_encoder_failure_or_exception(self):
+        failed = mock.Mock(returncode=1)
+        with mock.patch.object(transcode_plan.subprocess, "run", return_value=failed):
+            self.assertFalse(transcode_plan._probe_encoder("h264_nvenc"))
+        with mock.patch.object(transcode_plan.subprocess, "run", side_effect=Exception("ffmpeg error")):
+            self.assertFalse(transcode_plan._probe_encoder("h264_nvenc"))
+
+
+class TestMergeSessionExtended(GateFreeAfterTest, unittest.TestCase):
+    def test_merge_session_propagates_exceptions(self):
+        logs = []
+        with self.assertRaises(ValueError):
+            with transcode_plan.merge_session(lambda msg, tag: logs.append((msg, tag)), "mp4") as session:
+                session.merge_started(
+                    transcode_plan.TranscodePlan(["-c:v", "libx264"], True, "non_h264", None),
+                    "clip.mp4",
+                )
+                self.assertTrue(session._holding_gate)
+                raise ValueError("simulated crash")
+        # After exception exit, gate must be freed
+        self.assertFalse(transcode_plan._TRANSCODE_GATE.locked())
+
+    def test_uncommitted_container_verify_returns_true(self):
+        session = transcode_plan.merge_session(lambda *_: None, "m4a")
+        self.assertIsNone(session._committed_codec)
+        self.assertTrue(session.verify())
+
+
+class TestVerifyOutputCodecErrorHandling(unittest.TestCase):
+    def setUp(self):
+        self._saved = transcode_plan._ffprobe_missing_reported
+        transcode_plan._ffprobe_missing_reported = False
+
+    def tearDown(self):
+        transcode_plan._ffprobe_missing_reported = self._saved
+
+    def test_ffprobe_missing_warns_once_and_passes(self):
+        logs = []
+        log_fn = lambda msg, tag: logs.append((msg, tag))
+        with mock.patch.object(transcode_plan.subprocess, "run", side_effect=FileNotFoundError):
+            res1 = transcode_plan.verify_h264_output("out.mp4", log_fn)
+            self.assertTrue(res1)
+            self.assertEqual(len(logs), 1)
+            self.assertIn("ffprobe not found", logs[0][0])
+            self.assertEqual(logs[0][1], "warn")
+
+            res2 = transcode_plan.verify_h264_output("out2.mp4", log_fn)
+            self.assertTrue(res2)
+            self.assertEqual(len(logs), 1)  # warned only once
+
+    def test_ffprobe_exception_fails(self):
+        logs = []
+        with mock.patch.object(transcode_plan.subprocess, "run", side_effect=RuntimeError("timeout or crash")):
+            res = transcode_plan.verify_h264_output("out.mp4", lambda msg, tag: logs.append((msg, tag)))
+            self.assertFalse(res)
+            self.assertTrue(any(tag == "error" for _, tag in logs))
+
+
+class TestTranscodeDataclasses(unittest.TestCase):
+    def test_encoder_is_frozen(self):
+        from dataclasses import FrozenInstanceError
+        enc = transcode_plan.Encoder(["-c:v", "libx264"], "libx264")
+        with self.assertRaises(FrozenInstanceError):
+            enc.kind = "nvenc"  # type: ignore
+
+    def test_transcode_plan_defaults_and_frozen(self):
+        from dataclasses import FrozenInstanceError
+        plan = transcode_plan.TranscodePlan(["-c:v", "copy"], False, "h264", None)
+        self.assertFalse(plan.allow_concurrent_software_slots)
+        with self.assertRaises(FrozenInstanceError):
+            plan.needs_gate = True  # type: ignore
+
+
 if __name__ == "__main__":
     unittest.main()
+

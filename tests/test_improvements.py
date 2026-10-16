@@ -116,5 +116,46 @@ class TestDownloadingEfficiencyImprovements(unittest.TestCase):
         self.assertTrue(impersonate_list[0] in ("chrome", "safari", "edge"))
 
 
+class TestBatchPolicyAndOutputTemplate(unittest.TestCase):
+    def test_batch_policy_defaults(self):
+        policy = models.BatchPolicy(out_dir=Path("out"))
+        self.assertFalse(policy.audio_only)
+        self.assertFalse(policy.gallery)
+        self.assertFalse(policy.force)
+        self.assertFalse(policy.write_metadata)
+        self.assertFalse(policy.playlist)
+        self.assertEqual(policy.max_workers, 3)
+        self.assertEqual(policy.retry_max, 3)
+        self.assertEqual(policy.target_codec, "h264")
+
+    def test_build_output_template_stream_detection(self):
+        url = "https://example.com/watch/my-video"
+
+        # 1. resolved == url is NOT a stream even if .m3u8 is present
+        tmpl = models.build_output_template(1, url, url, total=1, pad=2)
+        self.assertEqual(tmpl, "%(title).100B - [%(id)s].%(ext)s")
+
+        # 2. resolved != url with .m3u8 IS a stream
+        tmpl = models.build_output_template(1, url, "https://cdn.example.com/live.m3u8", total=1, pad=2)
+        self.assertEqual(tmpl, "my-video.%(ext)s")
+
+        # 3. resolved != url with .mp4 AND '?' IS a stream
+        tmpl = models.build_output_template(1, url, "https://cdn.example.com/frag.mp4?token=123", total=1, pad=2)
+        self.assertEqual(tmpl, "my-video.%(ext)s")
+
+        # 4. resolved != url with .mp4 but WITHOUT '?' is NOT a stream (standard direct file)
+        tmpl = models.build_output_template(1, url, "https://cdn.example.com/direct.mp4", total=1, pad=2)
+        self.assertEqual(tmpl, "%(title).100B - [%(id)s].%(ext)s")
+
+        # 5. resolved != url with '?' but WITHOUT .mp4/.m3u8 is NOT a stream
+        tmpl = models.build_output_template(1, url, "https://example.com/redirect?target=1", total=1, pad=2)
+        self.assertEqual(tmpl, "%(title).100B - [%(id)s].%(ext)s")
+
+        # 6. total > 1 adds numbered prefix
+        tmpl = models.build_output_template(1, url, "https://cdn.example.com/live.m3u8", total=5, pad=2)
+        self.assertEqual(tmpl, "01 - my-video.%(ext)s")
+
+
 if __name__ == "__main__":
     unittest.main()
+

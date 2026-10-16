@@ -79,10 +79,9 @@ def parse_sections(spec: str | None) -> list[tuple[float, float]] | None:
     """
     if not spec:
         return None
-    spec = spec.strip().lstrip("*").strip()
     ranges: list[tuple[float, float]] = []
     for chunk in spec.split(","):
-        chunk = chunk.strip()
+        chunk = chunk.strip().lstrip("*").strip()
         if not chunk or "-" not in chunk:
             continue
         start_s, end_s = chunk.split("-", 1)
