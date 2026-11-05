@@ -9,7 +9,7 @@ Start the GUI: `run.bat` or `python app.py`. Start the watcher: `python watcher.
 - shortcut: `Ctrl+Enter` @ src/yt_zero_touch/ui/app.py :: <Control-Return>
 - trace: `_start_download` @ src/yt_zero_touch/ui/app.py > `_download_worker` @ src/yt_zero_touch/ui/app.py > `run_batch` @ src/yt_zero_touch/services/orchestrator.py > `download_with_retry` @ src/yt_zero_touch/services/orchestrator.py
 - verify: Download batch
-- status: traced: read the chain; GUI not launched
+- status: proven 2026-11-05 (uncommitted on a737bff): `.claude/skills/verify-yt-zero-touch` `run download` (button and `--via shortcut`) downloaded a real clip in the GUI to an H.264/AAC MP4 with a history entry
 
 ## Quality and encoding options (GUI)
 - what: Pick Best/4K/1080p/720p/480p/Audio only/Photos, optional ProRes 422 Proxy MOV, subtitles, trim range.
@@ -60,9 +60,10 @@ Start the GUI: `run.bat` or `python app.py`. Start the watcher: `python watcher.
 - what: Watch urls.txt, download each new URL concurrently, record finished ones in history.
 - cli: `python watcher.py` @ src/yt_zero_touch/ui/cli/watcher.py :: add_argument("-f"
 - cli: `--dry-run` @ src/yt_zero_touch/ui/cli/watcher.py :: --dry-run
+- cli: `--history` @ src/yt_zero_touch/ui/cli/watcher.py :: --history (default: repo-root processed_urls.json shared with the GUI)
 - trace: `main` @ src/yt_zero_touch/ui/cli/watcher.py > `watch` @ src/yt_zero_touch/ui/cli/watcher.py > `_harvest_completed` @ src/yt_zero_touch/ui/cli/watcher.py
 - verify: Watcher
-- status: proven @ e66b47f: `python watcher.py --help` prints usage (re-run after the flatten/wip merge); the watch loop itself was not run
+- status: proven 2026-11-05 (uncommitted on a737bff): `.claude/skills/verify-yt-zero-touch` `run watcher` saved a link into a private urls.txt, and the watcher downloaded an H.264/AAC MP4 and recorded it in a private `--history`; repo-root history untouched
 
 ## Photo and carousel downloads
 - what: Quality "Photos" (or an image link yt-dlp finds nothing on) sends the URL to gallery-dl, borrowing a logged-in browser session for Instagram/Facebook/Threads.

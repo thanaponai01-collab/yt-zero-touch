@@ -17,6 +17,15 @@ Run them all with `verify.py run`.
 - test: `python -m pytest tests/test_package_imports.py -q`
 - fail-proof: [Package Imports] misspelled a re-exported import in src/yt_zero_touch/core/__init__.py; test_package_imports.py went red, reverted (git diff empty)
 
+## Link detection
+- test: `python -m pytest tests/test_url_re.py -q`
+- fail-proof: TLD cap at 6 characters in URL_RE (src/yt_zero_touch/core/models.py) is the original bug; test_url_re.py was red against it before the fix
+
+## Real-app runs
+- run: `python .claude/skills/verify-yt-zero-touch/scripts/drive.py run <scenario>` with `download`, `watcher`, `preset`, `load-urls`, `clipboard`, `settings-restart` or `smoke` (needs a desktop session; `download` and `watcher` need network)
+- proof: exit 0, with screenshots, state, log and ffprobe saved in `.claude/verify-evidence/<run-id>/`
+- not in `verify.py run`: these runs take real time and network, so run them by hand for GUI or pipeline changes
+
 ## GUI
 - test: `python -m pytest tests/test_gui_smoke.py -q`
 - fail-proof: [start button] audio flag ignored, and the no-URL guard removed: test_start_button / test_start_with_nothing red; [link count] wrong count text; [load urls.txt] dedupe removed; [clear finished] filter disabled; [settings] quality not restored; [clipboard] poll disabled: each turned test_gui_smoke red in src/yt_zero_touch/ui/app.py, reverted (git diff empty)
@@ -46,6 +55,6 @@ Run them all with `verify.py run`.
 - fail-proof: not yet mutation-checked (arrived with the flatten/wip merge)
 
 ## Blind spots
-- No real-run check: nothing downloads a real URL (yt-dlp, gallery-dl, gdown, Playwright and ffmpeg are not exercised end to end). update_tools is tested with subprocess faked, never against real pip.
+- Real runs cover only yt-dlp + ffmpeg, through the verify skill (`download`, `watcher`). gallery-dl, gdown and Playwright are never run end to end. update_tools is tested with subprocess faked, never against real pip.
 - The GUI smoke drives 7 handlers on a hidden real window (run_batch stubbed for the start button); it does not check layout or a real download. The Tk window is created once per run, with retries for a spurious Windows 'tk.tcl' startup error (0 failures in 12 consecutive runs after the retry was added; it flaked about 1 in 3 before).
 - Engines: only the yt-dlp engine is exercised (through `tests/test_ytdlp_skill.py`, with yt-dlp faked); `gallery_engine.py` and `gdrive_engine.py` are tested with subprocess and gdown faked; neither tool is ever run for real. `ui/state.py` is not imported by anything.

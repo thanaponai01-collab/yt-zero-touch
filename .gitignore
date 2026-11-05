@@ -23,7 +23,8 @@ cookies.txt
 
 # Claude Code local data
 memory.db
-.claude/
+.claude/*
+!.claude/skills/
 .project-context/
 .verify-state.json
 RUN.json
