@@ -255,13 +255,7 @@ def watch(
                 print(f"  Total history : {len(history)} URLs\n")
 
 
-def main():
-    # .../<repo>/src/yt_zero_touch/ui/cli/watcher.py -> <repo>. parents[3] is
-    # src/, which is where the urls.txt and downloads/ defaults used to point.
-    base = Path(__file__).resolve().parents[4]
-    if not check_dependencies():
-        raise SystemExit(1)
-
+def build_parser(base: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Zero-touch yt-dlp file watcher")
     parser.add_argument("-f", "--file", default=str(base / "urls.txt"), help="Text file to watch")
     parser.add_argument("-o", "--output", default=str(base / "downloads"), help="Download directory")
@@ -274,7 +268,19 @@ def main():
     parser.add_argument("--sub-langs", default=None, help="Comma-separated subtitle lang codes")
     parser.add_argument("--sections", default=None, help="Clip trim range e.g. 10:00-20:00")
     parser.add_argument("--prores", "--prores-proxy", dest="prores_proxy", action="store_true", help="Target ProRes 422 Proxy MOV")
-    args = parser.parse_args()
+    parser.add_argument("--history", default=str(base / "processed_urls.json"),
+                        help="Processed-URL history file (default: shared with the GUI)")
+    return parser
+
+
+def main():
+    # .../<repo>/src/yt_zero_touch/ui/cli/watcher.py -> <repo>. parents[3] is
+    # src/, which is where the urls.txt and downloads/ defaults used to point.
+    base = Path(__file__).resolve().parents[4]
+    if not check_dependencies():
+        raise SystemExit(1)
+
+    args = build_parser(base).parse_args()
 
     sub_langs = args.sub_langs.split(",") if args.sub_langs else []
     cookie_path = Path(args.cookies) if args.cookies else None
@@ -292,7 +298,7 @@ def main():
         gallery=args.photos,
         sections=args.sections,
         target_codec=target_codec,
-        history_file=base / "processed_urls.json",
+        history_file=Path(args.history),
     )
 
 

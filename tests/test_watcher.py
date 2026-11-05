@@ -10,7 +10,6 @@ Run with:  python -m pytest tests/ -q     (or: python -m unittest -v)
 """
 
 import contextlib
-import inspect
 import io
 import json
 import sys
@@ -148,10 +147,13 @@ class TestWatcherDefaultPaths(unittest.TestCase):
         # Both front ends must skip the same URLs; two rival history files
         # means the first watcher run re-downloads everything the GUI has.
         base = Path(watcher.__file__).resolve().parents[4]
-        src = inspect.getsource(watcher.main)
-        self.assertIn('history_file=base / "processed_urls.json"', src)
-        self.assertEqual((base / "processed_urls.json").name,
-                         "processed_urls.json")
+        args = watcher.build_parser(base).parse_args([])
+        self.assertEqual(Path(args.history), base / "processed_urls.json")
+
+    def test_history_flag_points_a_run_at_its_own_file(self):
+        base = Path(watcher.__file__).resolve().parents[4]
+        args = watcher.build_parser(base).parse_args(["--history", "elsewhere/h.json"])
+        self.assertEqual(Path(args.history), Path("elsewhere/h.json"))
 
     def test_watch_honours_an_explicit_history_file(self):
         with tempfile.TemporaryDirectory() as tmp:
