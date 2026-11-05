@@ -32,7 +32,7 @@ QUALITY_PRESETS: dict[str, str] = {
 
 URL_RE = re.compile(
     r'https?://(?:www\.)?'
-    r'[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}'
+    r'[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,63}'
     r'\b[-a-zA-Z0-9()@:%_\+.~#?&/=]*'
 )
 
