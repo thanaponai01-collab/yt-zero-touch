@@ -24,6 +24,7 @@ from yt_zero_touch.core.models import (
     BatchResult,
     DownloadOutcome,
     build_output_template,
+    host_in,
 )
 from yt_zero_touch.services.resolver import (
     LogFn,
@@ -157,7 +158,8 @@ def download_with_retry(
             return DownloadOutcome(ok=False, failure=failure)
 
         if attempt <= retry_max:
-            delay = retry_delays[attempt - 1]
+            delay = (retry_delays[min(attempt, len(retry_delays)) - 1]
+                     if retry_delays else 0)
             base_log(f"  Attempt {attempt} failed — retrying in {delay}s…", "warn")
             set_item("retrying", None)
             for s in range(delay, 0, -1):
@@ -246,7 +248,7 @@ def run_batch(
         history_file = Path(history_path) if history_path else None
 
     needs_browser = any(
-        not (any(d in u for d in _KNOWN_DOMAINS) or _F1_RE.search(u))
+        not (host_in(u, _KNOWN_DOMAINS) or _F1_RE.search(u))
         for u in urls
     )
     worker_browser = (
@@ -268,9 +270,14 @@ def run_batch(
             else:
                 log(f"\n[{ts}] Resolving {idx + 1}/{len(urls)}: {url[:80]}", "accent")
                 on_item(idx + 1, url, "resolving", None)
-                resolved_list = resolve_fn(
-                    url, cookie_file=policy.cookie_file, log=log, _browser=worker_browser,
-                )
+                try:
+                    resolved_list = resolve_fn(
+                        url, cookie_file=policy.cookie_file, log=log,
+                        _browser=worker_browser,
+                    ) or [url]
+                except Exception as exc:
+                    log(f"  Resolve failed ({exc}) - trying the URL directly", "warn")
+                    resolved_list = [url]
                 if len(resolved_list) > 1:
                     log(f"  Page has {len(resolved_list)} videos - queuing all of them", "info")
             # A page URL that embeds several videos (e.g. an article carrying its

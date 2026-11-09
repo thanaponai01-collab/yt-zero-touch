@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from yt_zero_touch.core.history import load_history, save_history
-from yt_zero_touch.core.models import URL_RE
+from yt_zero_touch.core.models import URL_RE, host_in
 from yt_zero_touch.engines.ytdlp_engine import Downloader
 from yt_zero_touch.services.orchestrator import (
     CLIENT_RETRY_FALLBACK_CLIENT,
@@ -30,7 +30,7 @@ POLL_INTERVAL = 1.0
 
 
 def is_known_domain(url: str) -> bool:
-    return any(d in url for d in _KNOWN_DOMAINS)
+    return host_in(url, _KNOWN_DOMAINS)
 
 
 def read_urls_from_file(path: Path) -> list[str]:
@@ -117,7 +117,7 @@ def _harvest_completed(
             if failure:
                 print(f"[{ts}] Failed ({failure.label}) — {failure.remedy}: {url}")
             else:
-                print(f"[{ts}] Failed — will retry next time: {url}")
+                print(f"[{ts}] Failed — re-save the URL file to retry: {url}")
 
 
 def watch(

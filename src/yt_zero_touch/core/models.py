@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from yt_zero_touch.core.failures import FailureClass
@@ -44,9 +45,21 @@ IMAGE_HOSTS = (
 )
 
 
+def host_in(url: str, domains) -> bool:
+    """True if the URL's host is one of `domains` or a subdomain of one.
+
+    A plain substring test matched "x.com" inside "fedex.com".
+    """
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
 def is_image_host(url: str) -> bool:
     """True if the URL is on a host where gallery-dl handles photos/galleries."""
-    return any(h in url for h in IMAGE_HOSTS)
+    return host_in(url, IMAGE_HOSTS)
 
 
 # ---------------------------------------------------------------------------

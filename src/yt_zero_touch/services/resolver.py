@@ -14,6 +14,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from yt_zero_touch.core.models import host_in
+
 try:
     from playwright.sync_api import sync_playwright
     _PLAYWRIGHT_OK = True
@@ -122,7 +124,7 @@ def resolve_urls(
         return [bc]
 
     # 2. Known yt-dlp site — pass through
-    if any(d in url for d in _KNOWN_DOMAINS):
+    if host_in(url, _KNOWN_DOMAINS):
         return [url]
 
     # 3. Static HTML Brightcove scrape (fast, no browser)
