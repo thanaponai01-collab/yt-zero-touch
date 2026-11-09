@@ -1,0 +1,22 @@
+%% 1. Queue row status (orchestrator.run_batch / download_with_retry -> ui on_item)
+stateDiagram-v2
+    [*] --> resolving: not in history, not gallery
+    [*] --> skipped: already in history (not force)
+    [*] --> queued: gallery mode (no resolve)
+    resolving --> queued: one row per resolved video
+    queued --> downloading: download_with_retry starts
+    downloading --> merging: yt-dlp "finished" hook
+    merging --> downloading: next stream (audio after video)
+    downloading --> retrying: transient failure, attempts left
+    retrying --> downloading: next attempt
+    downloading --> done: success (history.add)
+    merging --> done
+    downloading --> failed: permanent or attempts exhausted
+    retrying --> failed
+    done --> [*]
+    failed --> [*]
+    skipped --> [*]
+
+%% 2. App pipeline flag (ui/app.py: self.downloading + dl_btn)
+%% idle --> running (_start_download) --> idle (worker finally; button reset later via after(0))
+%% Retry Failed button is enabled in "running" if any row failed -> open bug.

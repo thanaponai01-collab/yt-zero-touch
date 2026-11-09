@@ -210,6 +210,20 @@ class App(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(3, weight=1)
 
+        self._build_header()
+        # ── Main Container ─────────────────────────────────────────────
+        container = tk.Frame(self, bg=COLORS["bg"], padx=14, pady=8)
+        container.grid(row=1, column=0, sticky="ew")
+        container.columnconfigure(0, weight=1)
+
+        self._build_links_card(container)
+        self._build_controls_card(container)
+        self._build_actions_card(container)
+        self._build_queue_card(container)
+        self._build_log_card()
+        self._build_status_bar()
+
+    def _build_header(self):
         # ── 1. Top Header Bar ──────────────────────────────────────────
         header = tk.Frame(self, bg=COLORS["card"], padx=18, pady=10, highlightthickness=1, highlightbackground=COLORS["border"])
         header.grid(row=0, column=0, sticky="ew")
@@ -247,11 +261,7 @@ class App(tk.Tk):
         )
         hw_pill.pack(side="right")
 
-        # ── Main Container ─────────────────────────────────────────────
-        container = tk.Frame(self, bg=COLORS["bg"], padx=14, pady=8)
-        container.grid(row=1, column=0, sticky="ew")
-        container.columnconfigure(0, weight=1)
-
+    def _build_links_card(self, container):
         # ── Card 1: Target Links ───────────────────────────────────────
         url_card = tk.Frame(container, bg=COLORS["card"], padx=14, pady=10, highlightthickness=1, highlightbackground=COLORS["border"])
         url_card.pack(fill="x", pady=(0, 8))
@@ -324,6 +334,7 @@ class App(tk.Tk):
             font=("Segoe UI", 8),
         ).pack(side="right")
 
+    def _build_controls_card(self, container):
         # ── Card 2: Interactive Chips & Encoding Controls ──────────────
         controls_card = tk.Frame(container, bg=COLORS["card"], padx=14, pady=10, highlightthickness=1, highlightbackground=COLORS["border"])
         controls_card.pack(fill="x", pady=(0, 8))
@@ -397,6 +408,10 @@ class App(tk.Tk):
             active_border=COLORS["error"],
         ).pack(side="left", padx=(10, 0))
 
+        self._build_trim_cookies_row(controls_card)
+        self._build_summary_banner(controls_card)
+
+    def _build_trim_cookies_row(self, controls_card):
         # Trim & Cookies Row
         trim_cookie_row = tk.Frame(controls_card, bg=COLORS["card"])
         trim_cookie_row.pack(fill="x", pady=(4, 6))
@@ -459,6 +474,7 @@ class App(tk.Tk):
             highlightthickness=1, highlightbackground=COLORS["border"],
         ).pack(side="left")
 
+    def _build_summary_banner(self, controls_card):
         # ── Live Profile Summary Banner ────────────────────────────────
         self.summary_card = tk.Frame(controls_card, bg=COLORS["card_alt"], padx=10, pady=5, highlightthickness=1, highlightbackground=COLORS["border"])
         self.summary_card.pack(fill="x", pady=(4, 0))
@@ -471,6 +487,8 @@ class App(tk.Tk):
         self.summary_lbl.pack(side="left", fill="x", expand=True)
         self._update_profile_summary()
 
+
+    def _build_actions_card(self, container):
         # ── Primary Download & Actions ─────────────────────────────────
         action_row = tk.Frame(container, bg=COLORS["bg"])
         action_row.pack(fill="x", pady=(4, 8))
@@ -503,6 +521,7 @@ class App(tk.Tk):
             highlightthickness=1, highlightbackground=COLORS["border"],
         ).pack(side="right")
 
+    def _build_queue_card(self, container):
         # ── Card 3: Live Pipeline Queue Table ──────────────────────────
         queue_card = tk.Frame(container, bg=COLORS["card"], padx=14, pady=8, highlightthickness=1, highlightbackground=COLORS["border"])
         queue_card.pack(fill="x", pady=(0, 8))
@@ -577,6 +596,7 @@ class App(tk.Tk):
         self.queue.pack(side="left", fill="x", expand=True)
         qscroll.pack(side="right", fill="y")
 
+    def _build_log_card(self):
         # ── Card 4: Diagnostics Log Drawer ─────────────────────────────
         log_card = tk.Frame(self, bg=COLORS["card"], padx=14, pady=6, highlightthickness=1, highlightbackground=COLORS["border"])
         log_card.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 4))
@@ -608,6 +628,7 @@ class App(tk.Tk):
         ]:
             self.log_box.tag_config(tag, foreground=color)
 
+    def _build_status_bar(self):
         # ── Status Bar ─────────────────────────────────────────────────
         self.status_var = tk.StringVar(value="Idle")
         status_bar = tk.Frame(self, bg=COLORS["card_alt"], padx=10, pady=3)
@@ -628,7 +649,7 @@ class App(tk.Tk):
         self.footer_out_lbl.pack(side="right")
 
     # ------------------------------------------------------------------
-    # Dynamic Profile Summary UX
+
     # ------------------------------------------------------------------
 
     def _update_profile_summary(self):
@@ -886,6 +907,9 @@ class App(tk.Tk):
         ).start()
 
     def _retry_failed(self):
+        if self.downloading:
+            self._log("A pipeline is still running - retry the failed items when it finishes.", "warn")
+            return
         failed_urls = list(self._last_failed_urls)
         for iid in self.queue.get_children():
             tags = self.queue.item(iid, "tags") or ()
@@ -923,18 +947,33 @@ class App(tk.Tk):
                     if v == iid:
                         del self._queue_rows[k]
 
-    def _reset_queue(self, urls: list[str]):
-        for iid in self.queue.get_children():
-            self.queue.delete(iid)
-        self._queue_rows.clear()
-        self._last_failed_urls.clear()
-        if hasattr(self, "retry_failed_btn"):
+    def _set_retry_button(self, failed_cnt: int):
+        """Show the Retry Failed button as active (amber) or idle (muted)."""
+        if not hasattr(self, "retry_failed_btn"):
+            return
+        if failed_cnt > 0:
+            self.retry_failed_btn.config(
+                state="normal",
+                text=f"🔁 Retry Failed ({failed_cnt})",
+                bg=COLORS["amber"],
+                fg="black",
+                activebackground=COLORS["amber"],
+                activeforeground="black",
+            )
+        else:
             self.retry_failed_btn.config(
                 state="disabled",
                 text="🔁 Retry Failed (0)",
                 bg=COLORS["card_alt"],
                 fg=COLORS["muted"],
             )
+
+    def _reset_queue(self, urls: list[str]):
+        for iid in self.queue.get_children():
+            self.queue.delete(iid)
+        self._queue_rows.clear()
+        self._last_failed_urls.clear()
+        self._set_retry_button(0)
         for idx, url in enumerate(urls, 1):
             iid = self.queue.insert("", "end", values=(str(idx), url, "Queued", "-"), tags=("queued",))
             self._queue_rows[idx] = iid
@@ -963,24 +1002,7 @@ class App(tk.Tk):
                 if url in self._last_failed_urls:
                     self._last_failed_urls.remove(url)
 
-            failed_cnt = len(self._last_failed_urls)
-            if hasattr(self, "retry_failed_btn"):
-                if failed_cnt > 0:
-                    self.retry_failed_btn.config(
-                        state="normal",
-                        text=f"🔁 Retry Failed ({failed_cnt})",
-                        bg=COLORS["amber"],
-                        fg="black",
-                        activebackground=COLORS["amber"],
-                        activeforeground="black",
-                    )
-                else:
-                    self.retry_failed_btn.config(
-                        state="disabled",
-                        text="🔁 Retry Failed (0)",
-                        bg=COLORS["card_alt"],
-                        fg=COLORS["muted"],
-                    )
+            self._set_retry_button(len(self._last_failed_urls))
         self.after(0, _apply)
 
     def _update_ytdlp(self, quiet: bool = False):

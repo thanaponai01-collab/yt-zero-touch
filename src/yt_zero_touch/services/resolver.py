@@ -168,10 +168,6 @@ def _fetch_page_html(url: str, cookie_file: Path | None) -> str:
     return resp.read().decode("utf-8", errors="replace")
 
 
-def _brightcove_from_page(url: str, cookie_file: Path | None) -> str | None:
-    return _brightcove_from_html(_fetch_page_html(url, cookie_file))
-
-
 def _brightcove_all_from_page(url: str, cookie_file: Path | None) -> list[str]:
     return _brightcove_all_from_html(_fetch_page_html(url, cookie_file))
 

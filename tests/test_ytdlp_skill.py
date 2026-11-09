@@ -20,6 +20,7 @@ from yt_zero_touch.core.models import QUALITY_PRESETS  # noqa: E402
 from yt_zero_touch.core import transcode as transcode_plan  # noqa: E402
 from yt_zero_touch.core import format_policy  # noqa: E402
 from yt_zero_touch.core.models import is_image_host  # noqa: E402
+from gate_guard import GateFreeAfterTest  # noqa: E402
 
 
 class TestIsImageHost(unittest.TestCase):
@@ -103,22 +104,6 @@ class TestGalleryRouting(unittest.TestCase):
             )
         self.assertFalse(ok)
         mg.assert_not_called()
-
-
-class GateFreeAfterTest:
-    """Fails the test that leaked the process-wide transcode gate, by name,
-    then frees it so the rest of the suite still runs.
-
-    Deleting this guard outright would not surface a leak as a failure — the
-    gate is a non-reentrant Lock, so the next test to take it would block
-    forever and the suite would hang with no culprit named."""
-
-    def tearDown(self):
-        super().tearDown()
-        leaked = transcode_plan._TRANSCODE_GATE.locked()
-        if leaked:
-            transcode_plan._TRANSCODE_GATE.release()
-        self.assertFalse(leaked, "test leaked the process-wide transcode gate")
 
 
 class DownloadApiHarness(GateFreeAfterTest, unittest.TestCase):

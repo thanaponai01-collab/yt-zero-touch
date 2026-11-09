@@ -22,15 +22,6 @@ PLANS = {
 MAX_MERGES = 2
 
 
-def steps_for(needs_seq):
-    """One worker's program: merge(needs) then end it by finish or by 'crash'
-    (no merge_finished; the next merge_started or __exit__ must free the gate)."""
-    prog = []
-    for needs in needs_seq:
-        prog += [("start", needs), ("end", None)]
-    return prog
-
-
 def worker_programs():
     for n in range(0, MAX_MERGES + 1):
         for needs_seq in itertools.product((True, False), repeat=n):
