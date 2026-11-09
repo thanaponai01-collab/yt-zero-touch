@@ -1,0 +1,72 @@
+---
+title: "One video: from paste to a Premiere-ready file (or a clear reason why not)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: done
+    lg1: failed
+    lg2: fallback
+    lg3: working
+  }
+  class lg0 teal
+  class lg1 orange
+  class lg2 purple
+  class lg3 blue
+  s0: You pasted a link
+  s1: Downloading
+  s2: Attempt failed: unreachable stream URL
+  s3: Attempt failed: login wall
+  s4: Attempt failed: unknown error
+  s5: Attempt failed: removed / geo-blocked
+  s6: Done: file in your folder
+  s7: Trying another player client (login wall)
+  s8: Trying another player client (bad stream URL)
+  s9: Stopped: needs you (removed / geo-blocked)
+  s10: Stopped: needs you (login wall)
+  s11: Downloading (alternate player client)
+  s12: Stopped: all retries used
+  [*] --> s0
+  s0 --> s1: app starts the download
+  s1 --> s2: download fails
+  s1 --> s3: download fails
+  s1 --> s4: download fails
+  s1 --> s5: download fails
+  s1 --> s6: download succeeds
+  s2 --> s8: app tries one other player client [first bad stream URL]
+  s3 --> s7: app tries one other player client [first login wall]
+  s4 --> s1: app waits, then retries
+  s5 --> s9: app gives up
+  s7 --> s2: other client also fails
+  s7 --> s3: other client also fails
+  s7 --> s4: other client also fails
+  s7 --> s5: other client also fails
+  s7 --> s6: other client succeeds
+  s8 --> s2: other client also fails
+  s8 --> s3: other client also fails
+  s8 --> s4: other client also fails
+  s8 --> s5: other client also fails
+  s8 --> s6: other client succeeds
+  s2 --> s1: app waits, then retries
+  s3 --> s10: app gives up
+  s2 --> s11: app waits, then retries
+  s4 --> s11: app waits, then retries
+  s11 --> s2: download fails
+  s11 --> s3: download fails
+  s11 --> s4: download fails
+  s11 --> s5: download fails
+  s11 --> s6: download succeeds
+  s4 --> s12: app gives up
+  s2 --> s12: app gives up
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 teal
+  class s7 purple
+  class s8 purple
+  class s9 orange
+  class s10 orange
+  class s11 blue
+  class s12 orange

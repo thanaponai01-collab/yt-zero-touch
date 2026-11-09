@@ -1,0 +1,95 @@
+---
+title: "Paste page A (two videos) + link B, run it, then run it again after a failure"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: bug
+    lg1: finished
+    lg2: working
+    lg3: Breaks NothingSkippedUnseen
+    lg4: Path to the NothingSkippedUnseen bug
+  }
+  class lg0 orange
+  class lg1 teal
+  class lg2 blue
+  class lg3 breaks
+  class lg4 bugPath
+  s0: Run 1: checking history
+  s1: Run 1: downloading
+  s2: Run 1 finished: A both ok, B ok
+  s3: Run 1 finished: A both ok, B failed
+  s4: Run 1 finished: A one ok, one failed, B ok
+  s5: Run 1 finished: A one ok, one failed, B failed
+  s6: Run 1 finished: A both failed, B ok
+  s7: Run 1 finished: A both failed, B failed
+  s8: Run 2: checking history
+  s9: Run 2: skips a video that was never downloaded
+  s10: Run 2: downloading
+  s11: Run 2 finished: A skipped, B ok
+  s12: Run 2 finished: A skipped, B failed
+  s13: Run 2 finished: A both ok, B skipped
+  s14: Run 2 finished: A one ok, one failed, B skipped
+  s15: Run 2 finished: A both failed, B skipped
+  s16: Run 2 finished: A both ok, B ok
+  s17: Run 2 finished: A both ok, B failed
+  s18: Run 2 finished: A one ok, one failed, B ok
+  s19: Run 2 finished: A one ok, one failed, B failed
+  s20: Run 2 finished: A both failed, B ok
+  s21: Run 2 finished: A both failed, B failed
+  [*] --> s0
+  s0 --> s0: app checks the history
+  s0 --> s1: app checks the history
+  s1 --> s1: a download starts or a download fails or a download finishes
+  s1 --> s2: a download finishes
+  s1 --> s3: a download fails or a download finishes
+  s1 --> s4: a download fails or a download finishes
+  s1 --> s5: a download fails or a download finishes
+  s1 --> s6: a download fails or a download finishes
+  s1 --> s7: a download fails
+  s3 --> s8: you run the batch again
+  s4 --> s8: you run the batch again
+  s5 --> s8: you run the batch again
+  s6 --> s8: you run the batch again
+  s7 --> s8: you run the batch again
+  s8 --> s9: app checks the history
+  s8 --> s10: app checks the history
+  s10 --> s11: a download finishes
+  s10 --> s12: a download fails
+  s10 --> s13: a download finishes
+  s10 --> s14: a download fails or a download finishes
+  s10 --> s15: a download fails
+  s10 --> s16: a download finishes
+  s10 --> s17: a download fails or a download finishes
+  s10 --> s18: a download fails or a download finishes
+  s10 --> s19: a download fails or a download finishes
+  s10 --> s20: a download fails or a download finishes
+  s10 --> s21: a download fails
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 blue
+  class s0 bugPath
+  class s1 blue
+  class s1 bugPath
+  class s2 teal
+  class s3 teal
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s6 teal
+  class s7 teal
+  class s8 blue
+  class s8 bugPath
+  class s9 orange
+  class s9 breaks
+  class s9 bugPath
+  class s10 blue
+  class s11 teal
+  class s12 teal
+  class s13 teal
+  class s14 teal
+  class s15 teal
+  class s16 teal
+  class s17 teal
+  class s18 teal
+  class s19 teal
+  class s20 teal
+  class s21 teal

@@ -29,3 +29,7 @@ memory.db
 .verify-state.json
 RUN.json
 *.log
+
+# Formal verification tool cache (pinned jar, see tools/formal/tlc.py)
+tools/formal/.cache/
+tools/formal/**/*_TTrace_*
