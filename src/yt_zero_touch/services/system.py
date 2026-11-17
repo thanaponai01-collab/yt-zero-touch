@@ -11,6 +11,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from yt_zero_touch.core.proc import NO_WINDOW
+
 
 def find_deno() -> str | None:
     """Find deno executable on PATH or in default user locations (~/.deno/bin)."""
@@ -32,6 +34,7 @@ def check_ffmpeg() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,
+            **NO_WINDOW,
         )
         return True
     except Exception:

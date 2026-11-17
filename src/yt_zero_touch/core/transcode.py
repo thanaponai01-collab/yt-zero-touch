@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
+from yt_zero_touch.core.proc import NO_WINDOW
+
 LogFn = Callable[[str, str], None]
 
 # ---------------------------------------------------------------------------
@@ -95,7 +97,7 @@ def _probe_encoder(codec_name: str) -> bool:
             ["ffmpeg", "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=black:s=256x256:d=0.2",
              "-frames:v", "3", "-c:v", codec_name, "-f", "null", "-"],
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=30, **NO_WINDOW,
         )
         return proc.returncode == 0
     except Exception:
@@ -384,7 +386,7 @@ def _verify_output_codec(path: Path | str, log: LogFn, want_codec: str, want_lab
         proc = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=60, **NO_WINDOW,
         )
     except FileNotFoundError:
         if not _ffprobe_missing_reported:

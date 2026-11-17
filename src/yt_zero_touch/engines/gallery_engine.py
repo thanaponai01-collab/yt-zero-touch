@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from yt_zero_touch.engines.base import LogFn
+from yt_zero_touch.core.proc import NO_WINDOW
 
 try:
     import gallery_dl as _gallery_dl  # noqa: F401
@@ -105,7 +106,8 @@ def _run_gallery_dl(
     cmd.append(url)
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                              **NO_WINDOW)
     except subprocess.TimeoutExpired:
         log("  gallery-dl timed out after 600s", "error")
         return False, False

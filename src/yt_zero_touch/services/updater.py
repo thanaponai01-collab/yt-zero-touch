@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from yt_zero_touch.core.proc import NO_WINDOW
+
 LogFn = Callable[[str, str], None]
 
 
@@ -34,6 +36,7 @@ def get_pkg_version(pkg: str) -> str:
             capture_output=True,
             text=True,
             timeout=15,
+            **NO_WINDOW,
         )
         for ln in r.stdout.splitlines():
             if ln.lower().startswith("version:"):
@@ -70,6 +73,7 @@ def update_tools(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                **NO_WINDOW,
             )
         except Exception as exc:
             log(f"  {name} update failed: {exc}", "error")
