@@ -56,7 +56,7 @@ no terminal needed.
 3. Clone or download this repo
 4. Double-click  install.bat
 5. Double-click  YT-DLP Zero-Touch.vbs   (no terminal window)
-   or run.bat if you want to watch the live console
+   or run.bat (same, no terminal), or run-console.bat to watch the live console
 ```
 
 ### FFmpeg — pick one method
@@ -146,7 +146,8 @@ yt-zero-touch/
 ├── docs/adr/         # Architecture decision records
 ├── requirements.txt  # Python dependencies
 ├── install.bat       # First-time setup
-├── run.bat           # Launch the app with a console
+├── run.bat           # Launch the app with no console (calls the .vbs)
+├── run-console.bat   # Launch the app with a live console
 ├── YT-DLP Zero-Touch.vbs  # Launch the app with no console (logs to app.log)
 ├── app.pyw           # Windowless entry point used by the .vbs
 └── urls.txt          # Optional URL list
